@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <title>ECG WebSocket Test</title>
+</head>
+
+<body>
+
+<h2>ECG WebSocket Test</h2>
+
+<p id="status">Connecting...</p>
+
+<pre id="output"></pre>
+
+
+<script>
+
+const status = document.getElementById("status");
+const output = document.getElementById("output");
+
+
+// IMPORTANT:
+// Use the PC's LAN IP, not 127.0.0.1
+const ws = new WebSocket(
+    "ws://10.132.32.10:8000/ws/ecg"
+);
+
+
+ws.onopen = () => {
+
+    status.textContent = "WebSocket Connected";
+
+    console.log("WebSocket connected");
+
+};
+
+
+ws.onmessage = (event) => {
+
+    const data = JSON.parse(event.data);
+
+    console.log("ECG data received:", data);
+
+    output.textContent =
+        "Device: " + data.device_id + "\n" +
+        "Sampling Rate: " + data.sampling_rate + " Hz\n" +
+        "Samples: " + data.samples.length + "\n" +
+        "First: " + data.samples[0] + "\n" +
+        "Last: " + data.samples[data.samples.length - 1];
+
+};
+
+
+ws.onerror = (error) => {
+
+    console.error("WebSocket error:", error);
+
+    status.textContent = "WebSocket Error";
+
+};
+
+
+ws.onclose = () => {
+
+    status.textContent = "WebSocket Disconnected";
+
+};
+
+</script>
+
+</body>
+
+</html>
