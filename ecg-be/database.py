@@ -1,20 +1,16 @@
-from datetime import datetime
 from pathlib import Path
+from datetime import datetime
 
 from sqlalchemy import (
-    DateTime,
-    Float,
+    create_engine,
+    Column,
     Integer,
     String,
+    Float,
+    DateTime,
     Text,
-    create_engine,
 )
-from sqlalchemy.orm import (
-    DeclarativeBase,
-    Mapped,
-    mapped_column,
-    sessionmaker,
-)
+from sqlalchemy.orm import declarative_base, sessionmaker
 
 
 # ============================================================
@@ -22,35 +18,23 @@ from sqlalchemy.orm import (
 # ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
-
 DATABASE_PATH = BASE_DIR / "ecg_monitor.db"
-
-DATABASE_URL = (
-    f"sqlite:///{DATABASE_PATH.as_posix()}"
-)
-
+DATABASE_URL = f"sqlite:///{DATABASE_PATH.as_posix()}"
 
 engine = create_engine(
     DATABASE_URL,
-    connect_args={
-        "check_same_thread": False,
-    },
+    connect_args={"check_same_thread": False},
 )
 
+Base = declarative_base()
 
+# IMPORTANT:
+# Main.py imports this directly.
 SessionLocal = sessionmaker(
-    bind=engine,
     autocommit=False,
     autoflush=False,
+    bind=engine,
 )
-
-
-# ============================================================
-# BASE
-# ============================================================
-
-class Base(DeclarativeBase):
-    pass
 
 
 # ============================================================
@@ -60,209 +44,263 @@ class Base(DeclarativeBase):
 class ECGSession(Base):
     __tablename__ = "ecg_sessions"
 
-    id: Mapped[int] = mapped_column(
-        Integer,
-        primary_key=True,
-        index=True,
-    )
+    id = Column(Integer, primary_key=True)
 
-    session_id: Mapped[str] = mapped_column(
-        String(150),
+    session_id = Column(
+        String(64),
         unique=True,
         index=True,
         nullable=False,
     )
 
-    device_id: Mapped[str] = mapped_column(
+    device_id = Column(
         String(100),
         index=True,
         nullable=False,
     )
 
-    started_at: Mapped[datetime] = mapped_column(
+    started_at = Column(
         DateTime,
         nullable=False,
     )
 
-    last_packet_at: Mapped[datetime | None] = mapped_column(
-        DateTime,
-        nullable=True,
-    )
+    last_packet_at = Column(DateTime)
 
-    ended_at: Mapped[datetime | None] = mapped_column(
-        DateTime,
-        nullable=True,
-    )
+    ended_at = Column(DateTime)
 
-    sampling_rate: Mapped[int] = mapped_column(
+    sampling_rate = Column(
         Integer,
+        default=200,
         nullable=False,
     )
 
-    samples_received: Mapped[int] = mapped_column(
+    samples_received = Column(
         Integer,
         default=0,
         nullable=False,
     )
 
-    packets_received: Mapped[int] = mapped_column(
+    packets_received = Column(
         Integer,
         default=0,
         nullable=False,
     )
 
-    status: Mapped[str] = mapped_column(
+    status = Column(
         String(30),
         default="active",
         nullable=False,
     )
 
+    lead = Column(
+        String(20),
+        default="II",
+        nullable=False,
+    )
+
 
 # ============================================================
-# ECG MEASUREMENTS
+# ECG MEASUREMENT / ANALYSIS SNAPSHOT
 # ============================================================
 
 class ECGMeasurement(Base):
     __tablename__ = "ecg_measurements"
 
-    id: Mapped[int] = mapped_column(
-        Integer,
-        primary_key=True,
-        index=True,
-    )
+    id = Column(Integer, primary_key=True)
 
-    session_id: Mapped[str] = mapped_column(
-        String(150),
+    session_id = Column(
+        String(64),
         index=True,
         nullable=False,
     )
 
-    recorded_at: Mapped[datetime] = mapped_column(
+    recorded_at = Column(
         DateTime,
-        index=True,
         nullable=False,
     )
 
-    heart_rate_bpm: Mapped[float | None] = mapped_column(
-        Float,
-        nullable=True,
-    )
+    hr = Column(Float)
 
-    rr_interval_ms: Mapped[float | None] = mapped_column(
-        Float,
-        nullable=True,
-    )
+    rr = Column(Float)
 
-    p_duration_ms: Mapped[float | None] = mapped_column(
-        Float,
-        nullable=True,
-    )
+    p_duration = Column(Float)
 
-    pr_interval_ms: Mapped[float | None] = mapped_column(
-        Float,
-        nullable=True,
-    )
+    pr = Column(Float)
 
-    qrs_duration_ms: Mapped[float | None] = mapped_column(
-        Float,
-        nullable=True,
-    )
+    qrs = Column(Float)
 
-    qt_interval_ms: Mapped[float | None] = mapped_column(
-        Float,
-        nullable=True,
-    )
+    qt = Column(Float)
 
-    qtc_ms: Mapped[float | None] = mapped_column(
-        Float,
-        nullable=True,
-    )
+    qtc = Column(Float)
 
-    confidence: Mapped[float | None] = mapped_column(
-        Float,
-        nullable=True,
-    )
+    confidence = Column(Float)
 
-    measurement_status: Mapped[str | None] = mapped_column(
+    measurement_status = Column(
         String(50),
-        nullable=True,
     )
 
 
 # ============================================================
-# SIGNAL QUALITY
+# ECG SIGNAL QUALITY
 # ============================================================
 
 class ECGSignalQuality(Base):
     __tablename__ = "ecg_signal_quality"
 
-    id: Mapped[int] = mapped_column(
-        Integer,
-        primary_key=True,
-        index=True,
-    )
+    id = Column(Integer, primary_key=True)
 
-    session_id: Mapped[str] = mapped_column(
-        String(150),
+    session_id = Column(
+        String(64),
         index=True,
         nullable=False,
     )
 
-    recorded_at: Mapped[datetime] = mapped_column(
+    recorded_at = Column(
         DateTime,
+        nullable=False,
+    )
+
+    score = Column(Float)
+
+    label = Column(String(30))
+
+    baseline_wander = Column(Float)
+
+    noise_rms = Column(Float)
+
+    clipping_ratio = Column(Float)
+
+    peak_count = Column(Integer)
+
+    notes = Column(Text)
+
+
+# ============================================================
+# RAW ECG PACKETS
+# ============================================================
+
+class ECGRawPacket(Base):
+    __tablename__ = "ecg_raw_packets"
+
+    id = Column(Integer, primary_key=True)
+
+    session_id = Column(
+        String(64),
         index=True,
         nullable=False,
     )
 
-    score: Mapped[float | None] = mapped_column(
-        Float,
-        nullable=True,
+    device_id = Column(
+        String(100),
+        index=True,
+        nullable=False,
     )
 
-    label: Mapped[str | None] = mapped_column(
-        String(30),
-        nullable=True,
+    received_at = Column(
+        DateTime,
+        nullable=False,
     )
 
-    baseline_wander: Mapped[float | None] = mapped_column(
-        Float,
-        nullable=True,
-    )
-
-    noise_rms: Mapped[float | None] = mapped_column(
-        Float,
-        nullable=True,
-    )
-
-    clipping_ratio: Mapped[float | None] = mapped_column(
-        Float,
-        nullable=True,
-    )
-
-    peak_count: Mapped[int | None] = mapped_column(
+    sampling_rate = Column(
         Integer,
-        nullable=True,
+        nullable=False,
     )
 
-    notes: Mapped[str | None] = mapped_column(
+    lead_off = Column(
+        Integer,
+        default=0,
+    )
+
+    samples_json = Column(
         Text,
-        nullable=True,
+        nullable=False,
+    )
+
+    sample_count = Column(
+        Integer,
+        nullable=False,
     )
 
 
 # ============================================================
-# CREATE TABLES
+# ECG BEATS
+# ============================================================
+
+class ECGBeat(Base):
+    __tablename__ = "ecg_beats"
+
+    id = Column(Integer, primary_key=True)
+
+    session_id = Column(
+        String(64),
+        index=True,
+        nullable=False,
+    )
+
+    beat_index = Column(Integer)
+
+    r_peak_sample = Column(Integer)
+
+    start_sample = Column(Integer)
+
+    end_sample = Column(Integer)
+
+    rr_interval_ms = Column(Float)
+
+    heart_rate_bpm = Column(Float)
+
+    quality_score = Column(Float)
+
+    sampling_rate = Column(
+        Integer,
+        nullable=False,
+    )
+
+    lead = Column(
+        String(20),
+        default="II",
+        nullable=False,
+    )
+
+    sample_count = Column(Integer)
+
+    samples_json = Column(Text)
+
+    created_at = Column(DateTime)
+
+
+# ============================================================
+# DATABASE INITIALIZATION
 # ============================================================
 
 def create_tables():
-    Base.metadata.create_all(
-        bind=engine
-    )
+    Base.metadata.create_all(bind=engine)
 
 
 # ============================================================
-# DATABASE INFO
+# DATABASE INFORMATION
 # ============================================================
 
-def get_database_path() -> str:
-    return str(DATABASE_PATH)
+def get_database_info():
+    create_tables()
+
+    db = SessionLocal()
+
+    try:
+        return {
+            "path": str(DATABASE_PATH),
+            "exists": DATABASE_PATH.exists(),
+            "size_bytes": (
+                DATABASE_PATH.stat().st_size
+                if DATABASE_PATH.exists()
+                else 0
+            ),
+            "sessions": db.query(ECGSession).count(),
+            "measurements": db.query(ECGMeasurement).count(),
+            "signal_quality": db.query(ECGSignalQuality).count(),
+            "raw_packets": db.query(ECGRawPacket).count(),
+            "beats": db.query(ECGBeat).count(),
+        }
+
+    finally:
+        db.close()
