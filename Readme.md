@@ -7,8 +7,8 @@
 }
 
 # Steps to run server
-- Start the server `python -m uvicorn main:app --host 0.0.0.0 --port 8000`
-- Endpoint `http://127.0.0.1:8000`
+- Start the server `python -m uvicorn main:app --host 0.0.0.0 --port 9000`
+- Endpoint `http://127.0.0.1:9000`
 - Test the sample
 `{
   "device_id": "test_device",
