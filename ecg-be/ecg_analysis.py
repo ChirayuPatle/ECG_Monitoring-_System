@@ -1,1446 +1,686 @@
-from __future__ import annotations
-
 from dataclasses import dataclass, asdict
-from typing import Optional
-
-import math
+from typing import Any, Dict, List
 
 import numpy as np
-
-from scipy.signal import (
-    butter,
-    filtfilt,
-    find_peaks,
-)
+from scipy import signal
 
 
-# =========================================================
-# ECG MEASUREMENT MODEL
-# =========================================================
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
-@dataclass
-class ECGMeasurement:
+DEFAULT_SAMPLING_RATE = 200
 
-    heart_rate_bpm: Optional[float] = None
-
-    rr_interval_ms: Optional[float] = None
-
-    p_duration_ms: Optional[float] = None
-
-    pr_interval_ms: Optional[float] = None
-
-    qrs_duration_ms: Optional[float] = None
-
-    qt_interval_ms: Optional[float] = None
-
-    qtc_ms: Optional[float] = None
-
-    # Wave locations
-    p_onset_sample: Optional[int] = None
-
-    p_offset_sample: Optional[int] = None
-
-    qrs_onset_sample: Optional[int] = None
-
-    r_peak_sample: Optional[int] = None
-
-    qrs_offset_sample: Optional[int] = None
-
-    t_onset_sample: Optional[int] = None
-
-    t_offset_sample: Optional[int] = None
-
-    confidence: float = 0.0
-
-    status: str = "insufficient_data"
-
-    notes: list[str] | None = None
-
-    def to_dict(self):
-
-        return asdict(self)
+LOW_CUTOFF_HZ = 0.5
+HIGH_CUTOFF_HZ = 40.0
+NOTCH_FREQUENCY_HZ = 50.0
 
 
-# =========================================================
-# SIGNAL QUALITY MODEL
-# =========================================================
+# ============================================================
+# RESULT TYPES
+# ============================================================
 
 @dataclass
 class SignalQuality:
-
     score: float
-
     label: str
 
     baseline_wander: float
-
     noise_rms: float
-
     clipping_ratio: float
-
     peak_count: int
 
-    notes: list[str]
-
-    def to_dict(self):
-
-        return asdict(self)
+    notes: List[str]
 
 
-# =========================================================
-# SAFE FLOAT
-# =========================================================
+@dataclass
+class ECGMeasurement:
+    heart_rate_bpm: float | None
+    rr_interval_ms: float | None
 
-def _safe_float(value):
+    p_duration_ms: float | None
+    pr_interval_ms: float | None
+    qrs_duration_ms: float | None
 
-    if value is None:
-        return None
+    qt_interval_ms: float | None
+    qtc_ms: float | None
 
-    value = float(value)
+    confidence: float
 
-    return (
-        value
-        if math.isfinite(value)
-        else None
-    )
+    status: str
+    notes: List[str]
 
 
-# =========================================================
+@dataclass
+class ECGAnalysisResult:
+    filtered_signal: List[float]
+
+    r_peaks: List[int]
+
+    rr_intervals_ms: List[float]
+
+    heart_rate_bpm: float | None
+
+    measurement: Dict[str, Any]
+
+    signal_quality: Dict[str, Any]
+
+
+# ============================================================
+# SAFE NUMPY CONVERSION
+# ============================================================
+
+def to_array(samples) -> np.ndarray:
+    values = np.asarray(samples, dtype=np.float64)
+
+    values = values[np.isfinite(values)]
+
+    return values
+
+
+# ============================================================
 # BANDPASS FILTER
-# =========================================================
+# ============================================================
 
-def bandpass(
-    signal: np.ndarray,
-    fs: int,
-    low=0.5,
-    high=40.0,
+def bandpass_filter(
+    samples,
+    sampling_rate: int,
+    low_cutoff: float = LOW_CUTOFF_HZ,
+    high_cutoff: float = HIGH_CUTOFF_HZ,
 ):
+    x = to_array(samples)
 
-    nyquist = fs / 2.0
+    if len(x) < 30:
+        return x
 
-    high = min(
-        high,
-        nyquist - 1.0,
-    )
+    nyquist = sampling_rate / 2.0
 
-    if high <= low:
+    low = max(0.001, low_cutoff / nyquist)
+    high = min(0.99, high_cutoff / nyquist)
 
-        return signal.copy()
+    if low >= high:
+        return x
 
-    b, a = butter(
+    b, a = signal.butter(
         3,
-        [
-            low / nyquist,
-            high / nyquist,
-        ],
-        btype="band",
+        [low, high],
+        btype="bandpass",
     )
 
-    return filtfilt(
+    pad_length = min(
+        len(x) - 1,
+        3 * max(len(a), len(b)),
+    )
+
+    if pad_length < 3:
+        return x
+
+    return signal.filtfilt(
         b,
         a,
-        signal,
+        x,
+        padlen=pad_length,
     )
 
 
-# =========================================================
+# ============================================================
+# 50 Hz NOTCH
+# ============================================================
+
+def notch_filter(
+    samples,
+    sampling_rate: int,
+    frequency: float = NOTCH_FREQUENCY_HZ,
+):
+    x = to_array(samples)
+
+    if len(x) < 30:
+        return x
+
+    nyquist = sampling_rate / 2.0
+
+    if frequency >= nyquist:
+        return x
+
+    quality_factor = 30.0
+
+    b, a = signal.iirnotch(
+        frequency,
+        quality_factor,
+        sampling_rate,
+    )
+
+    pad_length = min(
+        len(x) - 1,
+        3 * max(len(a), len(b)),
+    )
+
+    if pad_length < 3:
+        return x
+
+    return signal.filtfilt(
+        b,
+        a,
+        x,
+        padlen=pad_length,
+    )
+
+
+# ============================================================
+# PREPROCESSING
+# ============================================================
+
+def preprocess_ecg(
+    samples,
+    sampling_rate: int = DEFAULT_SAMPLING_RATE,
+):
+    x = to_array(samples)
+
+    if len(x) < 30:
+        return x
+
+    # Remove DC offset first.
+    x = x - np.median(x)
+
+    # Remove power-line interference.
+    x = notch_filter(
+        x,
+        sampling_rate,
+    )
+
+    # ECG band limiting.
+    x = bandpass_filter(
+        x,
+        sampling_rate,
+    )
+
+    return x
+
+
+# ============================================================
 # R-PEAK DETECTION
-# =========================================================
+# ============================================================
 
 def detect_r_peaks(
-    signal: np.ndarray,
-    fs: int,
+    filtered_signal,
+    sampling_rate: int = DEFAULT_SAMPLING_RATE,
 ):
+    x = to_array(filtered_signal)
 
-    filtered = bandpass(
-        signal,
-        fs,
-        5.0,
-        min(
-            25.0,
-            fs / 2.0 - 1.0,
-        ),
-    )
+    if len(x) < sampling_rate:
+        return np.array([], dtype=int)
 
-    # Derivative
-    derivative = np.diff(
-        filtered,
-        prepend=filtered[0],
-    )
+    # Derivative emphasizes rapid QRS transitions.
+    derivative = np.diff(x, prepend=x[0])
 
-    # Squared derivative
-    energy = derivative * derivative
+    squared = derivative ** 2
 
-    # Moving integration window
+    # Approximately 100 ms integration window.
     integration_window = max(
         1,
-        int(0.10 * fs),
+        int(0.10 * sampling_rate),
     )
 
-    kernel = (
+    integrated = np.convolve(
+        squared,
         np.ones(integration_window)
-        / integration_window
-    )
-
-    envelope = np.convolve(
-        energy,
-        kernel,
+        / integration_window,
         mode="same",
     )
 
-    # Minimum R-R distance:
-    # 250 ms -> maximum theoretical HR
-    # around 240 BPM.
-    distance = max(
+    if not np.any(np.isfinite(integrated)):
+        return np.array([], dtype=int)
+
+    # Adaptive threshold.
+    threshold = (
+        np.median(integrated)
+        +
+        0.5 * np.std(integrated)
+    )
+
+    if threshold <= 0:
+        return np.array([], dtype=int)
+
+    # Minimum distance between R peaks:
+    # 250 ms → maximum theoretical HR around 240 bpm.
+    minimum_distance = max(
         1,
-        int(0.25 * fs),
+        int(0.25 * sampling_rate),
     )
 
-    median_env = np.median(
-        envelope
+    candidates, _ = signal.find_peaks(
+        integrated,
+        distance=minimum_distance,
+        prominence=threshold * 0.25,
     )
 
-    mad_env = (
-        np.median(
-            np.abs(
-                envelope
-                - median_env
-            )
-        )
-        + 1e-12
-    )
+    if len(candidates) == 0:
+        return np.array([], dtype=int)
 
-    prominence = (
-        median_env
-        + 2.5 * mad_env
-    )
-
-    peaks, _ = find_peaks(
-
-        envelope,
-
-        distance=distance,
-
-        prominence=max(
-            prominence,
-            np.percentile(
-                envelope,
-                75,
-            )
-            * 0.05,
-        ),
-    )
-
-    # -----------------------------------------------------
-    # Refine each candidate against ECG waveform
-    # -----------------------------------------------------
-
+    # Refine each candidate against the filtered ECG.
     search_radius = max(
         1,
-        int(0.08 * fs),
+        int(0.08 * sampling_rate),
     )
 
     refined = []
 
-    for peak in peaks:
+    for candidate in candidates:
 
-        left = max(
+        start = max(
             0,
-            peak - search_radius,
+            candidate - search_radius,
         )
 
-        right = min(
-            len(filtered),
-            peak + search_radius + 1,
+        end = min(
+            len(x),
+            candidate + search_radius + 1,
         )
 
-        if right <= left:
+        local = np.abs(x[start:end])
+
+        if len(local) == 0:
             continue
 
-        local = filtered[
-            left:right
-        ]
-
-        local_index = int(
-            np.argmax(
-                np.abs(local)
-            )
+        local_peak = start + int(
+            np.argmax(local)
         )
 
-        refined.append(
-            left + local_index
-        )
+        refined.append(local_peak)
 
-    # -----------------------------------------------------
-    # Remove duplicates
-    # -----------------------------------------------------
+    if not refined:
+        return np.array([], dtype=int)
 
-    refined = sorted(
-        set(refined)
+    refined = np.asarray(
+        sorted(set(refined)),
+        dtype=int,
     )
 
-    result = []
-
-    for peak in refined:
-
-        if (
-            not result
-            or peak - result[-1]
-            >= distance
-        ):
-
-            result.append(peak)
-
-    return (
-        np.asarray(
-            result,
-            dtype=int,
-        ),
-        filtered,
-    )
+    return refined
 
 
-# =========================================================
-# SIGNAL QUALITY
-# =========================================================
+# ============================================================
+# RR INTERVALS
+# ============================================================
 
-def estimate_signal_quality(
-    signal: np.ndarray,
-    fs: int,
-    peak_count: int,
+def calculate_rr_intervals(
+    r_peaks,
+    sampling_rate: int,
 ):
-
-    if len(signal) == 0:
-
-        return SignalQuality(
-
-            0.0,
-
-            "poor",
-
-            0.0,
-
-            0.0,
-
-            0.0,
-
-            0,
-
-            [
-                "No ECG samples available."
-            ],
-        )
-
-    x = np.asarray(
-        signal,
-        dtype=float,
+    peaks = np.asarray(
+        r_peaks,
+        dtype=int,
     )
 
-    # -----------------------------------------------------
-    # Baseline wander
-    # -----------------------------------------------------
+    if len(peaks) < 2:
+        return []
 
-    if len(x) > fs * 2:
+    differences = np.diff(peaks)
 
-        baseline = bandpass(
-            x,
-            fs,
-            0.05,
-            min(
-                0.5,
-                fs / 2 - 1,
-            ),
+    rr_ms = (
+        differences
+        / sampling_rate
+        * 1000.0
+    )
+
+    # Reject obviously impossible intervals.
+    rr_ms = rr_ms[
+        (rr_ms >= 250)
+        &
+        (rr_ms <= 2500)
+    ]
+
+    return [
+        float(value)
+        for value in rr_ms
+    ]
+
+
+# ============================================================
+# HEART RATE
+# ============================================================
+
+def calculate_heart_rate(
+    rr_intervals_ms,
+):
+    if not rr_intervals_ms:
+        return None
+
+    median_rr = float(
+        np.median(rr_intervals_ms)
+    )
+
+    if median_rr <= 0:
+        return None
+
+    hr = 60000.0 / median_rr
+
+    if hr < 20 or hr > 240:
+        return None
+
+    return round(hr, 2)
+
+
+# ============================================================
+# SIGNAL QUALITY
+# ============================================================
+
+def calculate_signal_quality(
+    raw_signal,
+    filtered_signal,
+    r_peaks,
+):
+    raw = to_array(raw_signal)
+    filtered = to_array(filtered_signal)
+
+    notes = []
+
+    if len(raw) == 0:
+        return SignalQuality(
+            score=0.0,
+            label="invalid",
+            baseline_wander=0.0,
+            noise_rms=0.0,
+            clipping_ratio=1.0,
+            peak_count=0,
+            notes=["No ECG samples available."],
         )
 
-    else:
-
-        baseline = (
-            x - np.median(x)
-        )
+    # Baseline estimate.
+    baseline = raw - filtered
 
     baseline_wander = float(
         np.std(baseline)
     )
 
-    # -----------------------------------------------------
-    # Noise
-    # -----------------------------------------------------
-
-    lowpassed = bandpass(
-        x,
-        fs,
-        0.5,
-        min(
-            40.0,
-            fs / 2 - 1,
-        ),
-    )
-
-    residual = (
-        x - lowpassed
-    )
+    # Noise estimate.
+    noise = raw - filtered
 
     noise_rms = float(
         np.sqrt(
             np.mean(
-                residual ** 2
+                np.square(noise)
             )
         )
     )
 
-    # -----------------------------------------------------
-    # Clipping
-    # -----------------------------------------------------
+    # ADC clipping estimate.
+    minimum = np.min(raw)
+    maximum = np.max(raw)
 
-    amplitude = np.ptp(x)
+    clipping_count = np.sum(
+        (raw <= 1)
+        |
+        (raw >= 1022)
+    )
 
-    if amplitude <= 1e-9:
+    clipping_ratio = float(
+        clipping_count / len(raw)
+    )
 
-        clipping_ratio = 1.0
-
-    else:
-
-        # ESP8266 ADC range is normally
-        # 0-1023 in this project.
-
-        if (
-            np.nanmax(x) <= 1023
-            and np.nanmin(x) >= 0
-        ):
-
-            clipping_ratio = float(
-                np.mean(
-                    (x <= 2)
-                    | (x >= 1021)
-                )
-            )
-
-        else:
-
-            clipping_ratio = 0.0
-
-    # -----------------------------------------------------
-    # Score
-    # -----------------------------------------------------
-
-    notes = []
+    peak_count = len(r_peaks)
 
     score = 100.0
 
-    if (
-        baseline_wander
-        > max(
-            amplitude * 0.20,
-            1.0,
-        )
-    ):
-
+    # Baseline penalty.
+    if baseline_wander > 100:
         score -= 25
-
         notes.append(
-            "Significant baseline movement detected."
+            "High baseline variation."
+        )
+    elif baseline_wander > 50:
+        score -= 12
+        notes.append(
+            "Moderate baseline variation."
         )
 
-    if amplitude > 0:
-
-        noise_ratio = (
-            noise_rms
-            / amplitude
-        )
-
-        if noise_ratio > 0.15:
-
-            score -= 30
-
-            notes.append(
-                "Elevated high-frequency/noise component."
-            )
-
-    if clipping_ratio > 0.01:
-
+    # Noise penalty.
+    if noise_rms > 80:
         score -= 30
-
         notes.append(
-            "Possible ADC clipping/saturation."
+            "High noise level."
         )
-
-    duration = (
-        len(x) / fs
-    )
-
-    if (
-        duration >= 5
-        and peak_count
-        < max(
-            2,
-            int(
-                duration
-                * 30
-                / 60
-            ),
-        )
-    ):
-
+    elif noise_rms > 40:
         score -= 15
-
         notes.append(
-            "Few reliable beat candidates detected."
+            "Moderate noise level."
+        )
+
+    # Clipping penalty.
+    if clipping_ratio > 0.05:
+        score -= 30
+        notes.append(
+            "Significant ADC clipping."
+        )
+    elif clipping_ratio > 0:
+        score -= 10
+        notes.append(
+            "Some ADC clipping detected."
+        )
+
+    if peak_count == 0:
+        score -= 25
+        notes.append(
+            "No R-peaks detected."
         )
 
     score = max(
         0.0,
-        min(
-            100.0,
-            score,
-        ),
+        min(100.0, score),
     )
 
     if score >= 80:
-
         label = "good"
-
     elif score >= 60:
-
-        label = "fair"
-
-    else:
-
+        label = "acceptable"
+    elif score >= 40:
         label = "poor"
+    else:
+        label = "very_poor"
 
     return SignalQuality(
-
-        score=round(
-            score,
-            1,
-        ),
-
+        score=round(score, 2),
         label=label,
-
         baseline_wander=round(
             baseline_wander,
             4,
         ),
-
         noise_rms=round(
             noise_rms,
             4,
         ),
-
         clipping_ratio=round(
             clipping_ratio,
-            5,
+            6,
         ),
-
-        peak_count=int(
-            peak_count
-        ),
-
+        peak_count=peak_count,
         notes=notes,
     )
 
 
-# =========================================================
-# WAVE BOUNDARY ESTIMATION
-# =========================================================
+# ============================================================
+# RESEARCH MORPHOLOGY ESTIMATES
+# ============================================================
 
-def _find_boundary(
-    signal: np.ndarray,
-    center: int,
-    direction: int,
-    fs: int,
-    window_ms: float,
-    threshold_ratio: float = 0.15,
+def estimate_morphology(
+    filtered_signal,
+    r_peaks,
+    sampling_rate,
 ):
-
-    window = max(
-        1,
-        int(
-            window_ms
-            / 1000.0
-            * fs
-        ),
-    )
-
-    if direction < 0:
-
-        start = max(
-            0,
-            center - window,
-        )
-
-        region = signal[
-            start:center + 1
-        ]
-
-        if len(region) < 3:
-            return None
-
-        peak = abs(
-            signal[center]
-            - np.median(region)
-        )
-
-        if peak <= 1e-9:
-            return None
-
-        threshold = (
-            peak
-            * threshold_ratio
-        )
-
-        for i in range(
-            len(region) - 1,
-            0,
-            -1,
-        ):
-
-            if (
-                abs(
-                    region[i]
-                    - np.median(region)
-                )
-                <= threshold
-            ):
-
-                return start + i
-
-        return start
-
-    end = min(
-        len(signal),
-        center + window + 1,
-    )
-
-    region = signal[
-        center:end
-    ]
-
-    if len(region) < 3:
-        return None
-
-    peak = abs(
-        signal[center]
-        - np.median(region)
-    )
-
-    if peak <= 1e-9:
-        return None
-
-    threshold = (
-        peak
-        * threshold_ratio
-    )
-
-    for i in range(
-        len(region)
-    ):
-
-        if (
-            abs(
-                region[i]
-                - np.median(region)
-            )
-            <= threshold
-        ):
-
-            return center + i
-
-    return end - 1
-
-
-# =========================================================
-# SINGLE-BEAT P/QRS/T DELINEATION
-# =========================================================
-
-def delineate_single_beat(
-    signal: np.ndarray,
-    fs: int,
-    r_peak: int,
-):
-
-    x = bandpass(
-        signal,
-        fs,
-        0.5,
-        min(
-            40.0,
-            fs / 2 - 1,
-        ),
-    )
-
-    # -----------------------------------------------------
-    # QRS
-    # -----------------------------------------------------
-
-    qrs_left = max(
-        0,
-        r_peak
-        - int(
-            0.12 * fs
-        ),
-    )
-
-    qrs_right = min(
-        len(x),
-        r_peak
-        + int(
-            0.12 * fs
-        ),
-    )
-
-    qrs_region = x[
-        qrs_left:qrs_right
-    ]
-
-    if len(qrs_region) < 5:
-
-        return ECGMeasurement(
-
-            r_peak_sample=int(
-                r_peak
-            ),
-
-            status="insufficient_data",
-
-            notes=[
-                "QRS region too short."
-            ],
-        )
-
-    qrs_amp = max(
-
-        np.ptp(
-            qrs_region
-        ),
-
-        np.std(
-            qrs_region
-        ) * 4,
-
-        1e-6,
-    )
-
-    threshold = (
-        qrs_amp * 0.08
-    )
-
-    qrs_onset = r_peak
-
-    for i in range(
-        r_peak,
-        qrs_left,
-        -1,
-    ):
-
-        if (
-            abs(
-                x[i]
-                - x[r_peak]
-            )
-            < threshold
-        ):
-
-            qrs_onset = i
-
-            break
-
-    qrs_offset = r_peak
-
-    for i in range(
-        r_peak,
-        qrs_right,
-    ):
-
-        if (
-            abs(
-                x[i]
-                - x[r_peak]
-            )
-            < threshold
-        ):
-
-            qrs_offset = i
-
-            break
-
-    qrs_duration = (
-        qrs_offset
-        - qrs_onset
-    ) * 1000 / fs
-
-    # -----------------------------------------------------
-    # P wave
-    # -----------------------------------------------------
-
-    p_left = max(
-        0,
-        r_peak
-        - int(
-            0.32 * fs
-        ),
-    )
-
-    p_right = max(
-        p_left + 1,
-        r_peak
-        - int(
-            0.08 * fs
-        ),
-    )
-
-    p_region = x[
-        p_left:p_right
-    ]
-
-    p_peak = None
-
-    if len(p_region) >= 5:
-
-        prominence = max(
-            np.std(
-                p_region
-            ) * 0.35,
-            1e-6,
-        )
-
-        p_candidates, _ = find_peaks(
-
-            np.abs(
-                p_region
-                - np.median(
-                    p_region
-                )
-            ),
-
-            distance=max(
-                1,
-                int(
-                    0.08 * fs
-                ),
-            ),
-
-            prominence=prominence,
-        )
-
-        if len(p_candidates):
-
-            candidate = (
-                p_candidates[-1]
-            )
-
-            p_peak = (
-                p_left
-                + int(candidate)
-            )
-
-    p_onset = None
-    p_offset = None
-    p_duration = None
-    pr_interval = None
-
-    if p_peak is not None:
-
-        p_onset = _find_boundary(
-            x,
-            p_peak,
-            -1,
-            fs,
-            100,
-        )
-
-        p_offset = _find_boundary(
-            x,
-            p_peak,
-            1,
-            fs,
-            100,
-        )
-
-        if (
-            p_onset is not None
-            and p_offset is not None
-        ):
-
-            p_duration = (
-                p_offset
-                - p_onset
-            ) * 1000 / fs
-
-        if p_onset is not None:
-
-            pr_interval = (
-                qrs_onset
-                - p_onset
-            ) * 1000 / fs
-
-    # -----------------------------------------------------
-    # T wave
-    # -----------------------------------------------------
-
-    t_left = min(
-        len(x) - 1,
-        r_peak
-        + int(
-            0.12 * fs
-        ),
-    )
-
-    t_right = min(
-        len(x),
-        r_peak
-        + int(
-            0.55 * fs
-        ),
-    )
-
-    t_region = x[
-        t_left:t_right
-    ]
-
-    t_peak = None
-
-    if len(t_region) >= 5:
-
-        candidates, _ = find_peaks(
-
-            np.abs(
-                t_region
-                - np.median(
-                    t_region
-                )
-            ),
-
-            distance=max(
-                1,
-                int(
-                    0.12 * fs
-                ),
-            ),
-
-            prominence=max(
-                np.std(
-                    t_region
-                ) * 0.30,
-                1e-6,
-            ),
-        )
-
-        if len(candidates):
-
-            strengths = [
-
-                abs(
-                    t_region[c]
-                    - np.median(
-                        t_region
-                    )
-                )
-
-                for c in candidates
-            ]
-
-            t_peak = (
-                t_left
-                + int(
-                    candidates[
-                        int(
-                            np.argmax(
-                                strengths
-                            )
-                        )
-                    ]
-                )
-            )
-
-    t_onset = None
-    t_offset = None
-    qt_interval = None
-    qtc = None
-
-    if t_peak is not None:
-
-        t_onset = _find_boundary(
-            x,
-            t_peak,
-            -1,
-            fs,
-            180,
-        )
-
-        t_offset = _find_boundary(
-            x,
-            t_peak,
-            1,
-            fs,
-            220,
-        )
-
-        if t_offset is not None:
-
-            qt_interval = (
-                t_offset
-                - qrs_onset
-            ) * 1000 / fs
-
-    # -----------------------------------------------------
-    # Confidence
-    # -----------------------------------------------------
-
-    confidence_components = []
-
-    if (
-        qrs_duration is not None
-        and 40
-        <= qrs_duration
-        <= 180
-    ):
-
-        confidence_components.append(
-            1.0
-        )
-
-    else:
-
-        confidence_components.append(
-            0.0
-        )
-
-    if p_peak is not None:
-
-        confidence_components.append(
-            0.7
-        )
-
-    else:
-
-        confidence_components.append(
-            0.0
-        )
-
-    if t_peak is not None:
-
-        confidence_components.append(
-            0.7
-        )
-
-    else:
-
-        confidence_components.append(
-            0.0
-        )
-
-    confidence = float(
-        np.mean(
-            confidence_components
-        )
-    )
-
-    return ECGMeasurement(
-
-        qrs_duration_ms=round(
-            float(
-                qrs_duration
-            ),
-            1,
-        ),
-
-        p_duration_ms=(
-
-            round(
-                float(
-                    p_duration
-                ),
-                1,
-            )
-
-            if p_duration is not None
-
-            else None
-        ),
-
-        pr_interval_ms=(
-
-            round(
-                float(
-                    pr_interval
-                ),
-                1,
-            )
-
-            if pr_interval is not None
-
-            else None
-        ),
-
-        qt_interval_ms=(
-
-            round(
-                float(
-                    qt_interval
-                ),
-                1,
-            )
-
-            if qt_interval is not None
-
-            else None
-        ),
-
-        p_onset_sample=p_onset,
-
-        p_offset_sample=p_offset,
-
-        qrs_onset_sample=qrs_onset,
-
-        r_peak_sample=int(
-            r_peak
-        ),
-
-        qrs_offset_sample=qrs_offset,
-
-        t_onset_sample=t_onset,
-
-        t_offset_sample=t_offset,
-
-        confidence=round(
-            confidence,
-            3,
-        ),
-
-        status="research_estimate",
-
-        notes=[
-
-            "Single-lead experimental "
-            "P/QRS/T delineation.",
-
-            "Do not use these values "
-            "for clinical decisions.",
-        ],
-    )
-
-
-# =========================================================
-# COMPLETE ECG ANALYSIS
-# =========================================================
-
-def analyze_ecg(
-    samples: list[float],
-    sampling_rate: int,
-):
-
-    if sampling_rate <= 0:
-
-        raise ValueError(
-            "sampling_rate must be positive."
-        )
-
-    x = np.asarray(
-        samples,
-        dtype=float,
-    )
-
-    minimum_samples = max(
-        400,
-        sampling_rate * 3,
-    )
-
-    # -----------------------------------------------------
-    # Not enough data
-    # -----------------------------------------------------
-
-    if len(x) < minimum_samples:
-
+    """
+    Research-only estimates.
+
+    These values are intentionally conservative.
+    They must NOT be interpreted as clinically validated
+    ECG interval measurements.
+    """
+
+    if len(r_peaks) == 0:
         return {
-
-            "status":
-                "insufficient_data",
-
-            "sampling_rate":
-                sampling_rate,
-
-            "samples_analyzed":
-                int(len(x)),
-
-            "measurements":
-
-                ECGMeasurement(
-
-                    status=
-                        "insufficient_data",
-
-                    notes=[
-
-                        f"At least "
-                        f"{minimum_samples} "
-                        f"samples are recommended "
-                        f"for the initial analysis "
-                        f"window."
-                    ],
-                ).to_dict(),
-
-            "signal_quality":
-
-                estimate_signal_quality(
-                    x,
-                    sampling_rate,
-                    0,
-                ).to_dict(),
-
-            "r_peaks": [],
+            "p_duration_ms": None,
+            "pr_interval_ms": None,
+            "qrs_duration_ms": None,
+            "qt_interval_ms": None,
+            "qtc_ms": None,
+            "confidence": 0.0,
+            "status": "insufficient_data",
+            "notes": [
+                "No reliable R-peaks available."
+            ],
         }
 
-    # -----------------------------------------------------
-    # R peaks
-    # -----------------------------------------------------
-
-    peaks, _ = detect_r_peaks(
-        x,
+    rr_intervals = calculate_rr_intervals(
+        r_peaks,
         sampling_rate,
     )
 
-    # -----------------------------------------------------
-    # RR
-    # -----------------------------------------------------
-
     rr = (
-        np.diff(peaks)
-        / sampling_rate
+        float(np.median(rr_intervals))
+        if rr_intervals
+        else None
     )
 
-    valid_rr = rr[
-        (rr >= 0.30)
-        &
-        (rr <= 2.50)
-    ]
+    # We deliberately don't invent morphology values.
+    return {
+        "p_duration_ms": None,
+        "pr_interval_ms": None,
+        "qrs_duration_ms": None,
+        "qt_interval_ms": None,
+        "qtc_ms": None,
+        "confidence": 0.35 if rr else 0.15,
+        "status": "research_estimate",
+        "notes": [
+            "P/QRS/T delineation is not yet clinically validated.",
+            "Use R-peak and RR analysis for the current stage.",
+        ],
+    }
 
-    heart_rate = None
-    rr_ms = None
 
-    if len(valid_rr):
+# ============================================================
+# COMPLETE ANALYSIS
+# ============================================================
 
-        rr_seconds = float(
-            np.median(
-                valid_rr
-            )
+def analyze_ecg(
+    samples,
+    sampling_rate: int = DEFAULT_SAMPLING_RATE,
+):
+    raw = to_array(samples)
+
+    if len(raw) < 30:
+        quality = SignalQuality(
+            score=0.0,
+            label="insufficient_data",
+            baseline_wander=0.0,
+            noise_rms=0.0,
+            clipping_ratio=0.0,
+            peak_count=0,
+            notes=[
+                "Not enough samples for ECG analysis."
+            ],
         )
 
-        rr_ms = (
-            rr_seconds
-            * 1000.0
+        measurement = ECGMeasurement(
+            heart_rate_bpm=None,
+            rr_interval_ms=None,
+            p_duration_ms=None,
+            pr_interval_ms=None,
+            qrs_duration_ms=None,
+            qt_interval_ms=None,
+            qtc_ms=None,
+            confidence=0.0,
+            status="insufficient_data",
+            notes=[
+                "At least 30 valid samples are required."
+            ],
         )
 
-        heart_rate = (
-            60.0
-            / rr_seconds
+        return ECGAnalysisResult(
+            filtered_signal=raw.tolist(),
+            r_peaks=[],
+            rr_intervals_ms=[],
+            heart_rate_bpm=None,
+            measurement=asdict(measurement),
+            signal_quality=asdict(quality),
         )
 
-    # -----------------------------------------------------
-    # Signal quality
-    # -----------------------------------------------------
-
-    quality = (
-        estimate_signal_quality(
-            x,
-            sampling_rate,
-            len(peaks),
-        )
+    filtered = preprocess_ecg(
+        raw,
+        sampling_rate,
     )
 
-    # -----------------------------------------------------
-    # Base measurement object
-    # -----------------------------------------------------
+    r_peaks = detect_r_peaks(
+        filtered,
+        sampling_rate,
+    )
+
+    rr_intervals = calculate_rr_intervals(
+        r_peaks,
+        sampling_rate,
+    )
+
+    heart_rate = calculate_heart_rate(
+        rr_intervals
+    )
+
+    quality = calculate_signal_quality(
+        raw,
+        filtered,
+        r_peaks,
+    )
+
+    morphology = estimate_morphology(
+        filtered,
+        r_peaks,
+        sampling_rate,
+    )
 
     measurement = ECGMeasurement(
-
-        heart_rate_bpm=(
-
-            round(
-                heart_rate,
-                1,
-            )
-
-            if heart_rate is not None
-
-            else None
-        ),
-
+        heart_rate_bpm=heart_rate,
         rr_interval_ms=(
-
             round(
-                rr_ms,
-                1,
+                float(np.median(rr_intervals)),
+                2,
             )
-
-            if rr_ms is not None
-
+            if rr_intervals
             else None
         ),
-
-        confidence=min(
-
-            1.0,
-
-            max(
-                0.0,
-                quality.score
-                / 100.0,
-            ),
-        ),
-
-        status=(
-
-            "research_estimate"
-
-            if heart_rate is not None
-
-            else "insufficient_data"
-        ),
-
-        notes=[],
+        p_duration_ms=morphology[
+            "p_duration_ms"
+        ],
+        pr_interval_ms=morphology[
+            "pr_interval_ms"
+        ],
+        qrs_duration_ms=morphology[
+            "qrs_duration_ms"
+        ],
+        qt_interval_ms=morphology[
+            "qt_interval_ms"
+        ],
+        qtc_ms=morphology[
+            "qtc_ms"
+        ],
+        confidence=morphology[
+            "confidence"
+        ],
+        status=morphology[
+            "status"
+        ],
+        notes=morphology[
+            "notes"
+        ],
     )
 
-    # -----------------------------------------------------
-    # Representative recent beat
-    # -----------------------------------------------------
-
-    if len(peaks):
-
-        representative = int(
-            peaks[-1]
-        )
-
-        beat = (
-            delineate_single_beat(
-                x,
-                sampling_rate,
-                representative,
-            )
-        )
-
-        fields = [
-
-            "p_duration_ms",
-
-            "pr_interval_ms",
-
-            "qrs_duration_ms",
-
-            "qt_interval_ms",
-
-            "p_onset_sample",
-
-            "p_offset_sample",
-
-            "qrs_onset_sample",
-
-            "r_peak_sample",
-
-            "qrs_offset_sample",
-
-            "t_onset_sample",
-
-            "t_offset_sample",
-        ]
-
-        for field in fields:
-
-            value = getattr(
-                beat,
-                field,
-            )
-
-            if value is not None:
-
-                setattr(
-                    measurement,
-                    field,
-                    value,
-                )
-
-        # -------------------------------------------------
-        # QTc - Fridericia
-        # -------------------------------------------------
-
-        if (
-
-            measurement.qt_interval_ms
-            is not None
-
-            and rr_ms is not None
-        ):
-
-            qt_seconds = (
-                measurement.qt_interval_ms
-                / 1000.0
-            )
-
-            rr_seconds = (
-                rr_ms
-                / 1000.0
-            )
-
-            qtc = (
-                qt_seconds
-                / (
-                    rr_seconds
-                    ** (1.0 / 3.0)
-                )
-            )
-
-            measurement.qtc_ms = round(
-                qtc * 1000.0,
-                1,
-            )
-
-        measurement.confidence = round(
-
-            min(
-
-                measurement.confidence,
-
-                beat.confidence
-
-                if beat.confidence > 0
-
-                else measurement.confidence,
-            ),
-
-            3,
-        )
-
-        measurement.notes.extend(
-            beat.notes or []
-        )
-
-    # -----------------------------------------------------
-    # Final result
-    # -----------------------------------------------------
-
-    return {
-
-        "status":
-            "ok",
-
-        "sampling_rate":
-            sampling_rate,
-
-        "samples_analyzed":
-            int(len(x)),
-
-        "duration_seconds":
-            round(
-                len(x)
-                / sampling_rate,
-                3,
-            ),
-
-        "measurements":
-            measurement.to_dict(),
-
-        "signal_quality":
-            quality.to_dict(),
-
-        "r_peaks":
-            peaks.tolist(),
-    }
+    return ECGAnalysisResult(
+        filtered_signal=[
+            round(float(v), 6)
+            for v in filtered
+        ],
+        r_peaks=[
+            int(v)
+            for v in r_peaks
+        ],
+        rr_intervals_ms=rr_intervals,
+        heart_rate_bpm=heart_rate,
+        measurement=asdict(measurement),
+        signal_quality=asdict(quality),
+    )   

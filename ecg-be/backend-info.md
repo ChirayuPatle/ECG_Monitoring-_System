@@ -63,7 +63,8 @@ for sessions and historical ECG recordings.
 
 
 ## Important routes
-`http://localhost:9000`
-`http://localhost:9000/api/session`
-`http://localhost:9000/api/database`
-`http://localhost:9000/api/session/Enter_session_ID/measurements`
+`http://10.132.32.10:9000/`
+`http://localhost:9000/`
+`http://localhost:9000/api/session/`
+`http://localhost:9000/api/database/`
+`http://localhost:9000/api/session/Enter_session_ID/measurements/`

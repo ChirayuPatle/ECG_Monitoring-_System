@@ -1,26 +1,31 @@
-from __future__ import annotations
-
-from collections import deque
+import json
+import uuid
+from collections import defaultdict, deque
 from datetime import datetime, timezone
+from typing import Optional
 
-from fastapi import (
-    FastAPI,
-    WebSocket,
-    WebSocketDisconnect,
-)
+import numpy as np
+from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from sqlalchemy import desc
 
 from database import (
+    ECGBeat,
     ECGMeasurement,
+    ECGRawPacket,
     ECGSession,
     ECGSignalQuality,
     SessionLocal,
     create_tables,
-    get_database_path,
+    get_database_info,
 )
 
 from ecg_analysis import analyze_ecg
+
+from beat_extraction import (
+    build_ml_dataset,
+    extract_beats,
+)
 
 
 # ============================================================
@@ -29,30 +34,42 @@ from ecg_analysis import analyze_ecg
 
 app = FastAPI(
     title="ECG Monitoring Backend",
-    description="IoMT ECG receiver, analysis and persistence backend",
-    version="3.0.0",
+    version="5.0.0",
+)
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
 # ============================================================
-# DATABASE INITIALIZATION
+# CONFIGURATION
 # ============================================================
 
-create_tables()
+ANALYSIS_WINDOW_SECONDS = 10
+
+DEFAULT_SAMPLING_RATE = 200
 
 
 # ============================================================
-# ECG CONFIGURATION
+# RUNTIME STATE
 # ============================================================
 
-ANALYSIS_SECONDS = 10
-
-DEFAULT_SAMPLE_RATE = 200
-
-MAX_ANALYSIS_SAMPLES = (
-    DEFAULT_SAMPLE_RATE *
-    ANALYSIS_SECONDS
+analysis_buffers = defaultdict(
+    lambda: deque(
+        maxlen=DEFAULT_SAMPLING_RATE
+        * ANALYSIS_WINDOW_SECONDS
+    )
 )
+
+active_sessions = {}
+
+connected_clients = set()
 
 
 # ============================================================
@@ -61,274 +78,179 @@ MAX_ANALYSIS_SAMPLES = (
 
 class ECGData(BaseModel):
 
-    device_id: str
+    device_id: str = Field(
+        min_length=1,
+        max_length=100,
+    )
 
     sampling_rate: int = Field(
-        gt=0
+        gt=0,
+        le=1000,
     )
 
-    samples: list[float]
-
-    timestamp_ms: int | None = None
-
-    sequence: int | None = None
-
-    lead_off: bool | None = None
-
-
-# ============================================================
-# WEBSOCKET MANAGER
-# ============================================================
-
-class ConnectionManager:
-
-    def __init__(self):
-
-        self.active_connections = []
-
-
-    async def connect(
-        self,
-        websocket: WebSocket,
-    ):
-
-        await websocket.accept()
-
-        self.active_connections.append(
-            websocket
-        )
-
-        print(
-            f"[WebSocket] Client connected "
-            f"({len(self.active_connections)} active)"
-        )
-
-
-    def disconnect(
-        self,
-        websocket: WebSocket,
-    ):
-
-        if websocket in self.active_connections:
-
-            self.active_connections.remove(
-                websocket
-            )
-
-        print(
-            f"[WebSocket] Client disconnected "
-            f"({len(self.active_connections)} active)"
-        )
-
-
-    async def broadcast(
-        self,
-        data: dict,
-    ):
-
-        disconnected = []
-
-        for websocket in self.active_connections:
-
-            try:
-
-                await websocket.send_json(
-                    data
-                )
-
-            except Exception:
-
-                disconnected.append(
-                    websocket
-                )
-
-        for websocket in disconnected:
-
-            self.disconnect(
-                websocket
-            )
-
-
-manager = ConnectionManager()
-
-
-# ============================================================
-# ANALYSIS BUFFERS
-# ============================================================
-
-analysis_buffers: dict[
-    str,
-    deque
-] = {}
-
-
-def get_analysis_buffer(
-    device_id: str,
-    sampling_rate: int,
-):
-
-    max_samples = max(
-        1,
-        int(
-            sampling_rate *
-            ANALYSIS_SECONDS
-        ),
+    samples: list[float] = Field(
+        min_length=1,
+        max_length=1000,
     )
 
-    if device_id not in analysis_buffers:
-
-        analysis_buffers[
-            device_id
-        ] = deque(
-            maxlen=max_samples
-        )
-
-    return analysis_buffers[
-        device_id
-    ]
+    lead_off: bool = False
 
 
 # ============================================================
-# ACTIVE SESSION CACHE
-# ============================================================
-
-active_sessions: dict[
-    str,
-    str
-] = {}
-
-
-# ============================================================
-# TIME HELPERS
+# TIME
 # ============================================================
 
 def utc_now():
     return datetime.now(
         timezone.utc
-    ).replace(
-        tzinfo=None
     )
 
 
 # ============================================================
-# SESSION CREATION
+# SESSION ID
+# ============================================================
+
+def generate_session_id():
+    timestamp = datetime.now().strftime(
+        "%Y%m%d_%H%M%S"
+    )
+
+    return (
+        f"ecg_{timestamp}_"
+        f"{uuid.uuid4().hex[:8]}"
+    )
+
+
+# ============================================================
+# JSON SERIALIZATION
+# ============================================================
+
+def json_safe(value):
+
+    if isinstance(
+        value,
+        datetime,
+    ):
+        return value.isoformat()
+
+    if isinstance(
+        value,
+        np.integer,
+    ):
+        return int(value)
+
+    if isinstance(
+        value,
+        np.floating,
+    ):
+        return float(value)
+
+    if isinstance(
+        value,
+        np.ndarray,
+    ):
+        return value.tolist()
+
+    if isinstance(
+        value,
+        dict,
+    ):
+        return {
+            key: json_safe(val)
+            for key, val in value.items()
+        }
+
+    if isinstance(
+        value,
+        list,
+    ):
+        return [
+            json_safe(item)
+            for item in value
+        ]
+
+    return value
+
+
+# ============================================================
+# SESSION MANAGEMENT
 # ============================================================
 
 def get_or_create_session(
-    device_id: str,
-    sampling_rate: int,
+    db,
+    device_id,
+    sampling_rate,
 ):
 
-    db = SessionLocal()
+    session_id = active_sessions.get(
+        device_id
+    )
 
-    try:
+    if session_id:
 
-        session_id = active_sessions.get(
-            device_id
-        )
-
-        if session_id:
-
-            existing = (
-                db.query(ECGSession)
-                .filter(
-                    ECGSession.session_id
-                    == session_id
-                )
-                .first()
-            )
-
-            if existing:
-
-                return existing
-
-
-        # ----------------------------------------------------
-        # Look for an existing active session.
-        # ----------------------------------------------------
-
-        existing = (
+        session = (
             db.query(ECGSession)
             .filter(
-                ECGSession.device_id
-                == device_id,
-
-                ECGSession.status
-                == "active",
-            )
-            .order_by(
-                desc(
-                    ECGSession.started_at
-                )
+                ECGSession.session_id
+                == session_id
             )
             .first()
         )
 
-        if existing:
+        if session:
+            return session
 
-            active_sessions[
-                device_id
-            ] = existing.session_id
+    session_id = generate_session_id()
 
-            return existing
+    session = ECGSession(
+        session_id=session_id,
+        device_id=device_id,
+        lead="II",
+        sampling_rate=sampling_rate,
+        started_at=utc_now(),
+        status="recording",
+    )
+
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+
+    active_sessions[
+        device_id
+    ] = session_id
+
+    return session
 
 
-        # ----------------------------------------------------
-        # Create new session.
-        # ----------------------------------------------------
+# ============================================================
+# BROADCAST
+# ============================================================
 
-        now = utc_now()
+async def broadcast(payload):
 
-        session_id = (
-            f"{device_id}-"
-            f"{now.strftime('%Y%m%dT%H%M%S')}"
+    disconnected = []
+
+    for websocket in list(
+        connected_clients
+    ):
+
+        try:
+
+            await websocket.send_json(
+                json_safe(payload)
+            )
+
+        except Exception:
+
+            disconnected.append(
+                websocket
+            )
+
+    for websocket in disconnected:
+
+        connected_clients.discard(
+            websocket
         )
-
-        session = ECGSession(
-
-            session_id=session_id,
-
-            device_id=device_id,
-
-            started_at=now,
-
-            last_packet_at=now,
-
-            sampling_rate=sampling_rate,
-
-            samples_received=0,
-
-            packets_received=0,
-
-            status="active",
-        )
-
-        db.add(session)
-
-        db.commit()
-
-        db.refresh(session)
-
-        active_sessions[
-            device_id
-        ] = session.session_id
-
-        print(
-            f"[SESSION] Created: "
-            f"{session.session_id}"
-        )
-
-        return session
-
-    except Exception:
-
-        db.rollback()
-
-        raise
-
-    finally:
-
-        db.close()
 
 
 # ============================================================
@@ -341,7 +263,9 @@ def root():
     return {
         "status": "running",
         "service": "ECG Monitoring Backend",
-        "version": "3.0.0",
+        "version": "5.0.0",
+        "database": "SQLite",
+        "sampling_target_hz": 200,
     }
 
 
@@ -352,61 +276,30 @@ def root():
 @app.get("/api/health")
 def health():
 
-    db = SessionLocal()
+    info = get_database_info()
 
-    try:
-
-        session_count = (
-            db.query(ECGSession)
-            .count()
-        )
-
-        measurement_count = (
-            db.query(ECGMeasurement)
-            .count()
-        )
-
-        quality_count = (
-            db.query(ECGSignalQuality)
-            .count()
-        )
-
-        return {
-
-            "status": "healthy",
-
-            "database": "connected",
-
-            "sessions": session_count,
-
-            "measurements":
-                measurement_count,
-
-            "signal_quality_records":
-                quality_count,
-
-            "websocket_clients":
-                len(
-                    manager.active_connections
-                ),
-
-            "active_devices":
-                len(
-                    active_sessions
-                ),
-        }
-
-    finally:
-
-        db.close()
+    return {
+        "status": "healthy",
+        "database": info,
+    }
 
 
 # ============================================================
-# DATABASE DIAGNOSTIC
+# DATABASE INFO
 # ============================================================
 
 @app.get("/api/database")
 def database_info():
+
+    return get_database_info()
+
+
+# ============================================================
+# LIST SESSIONS
+# ============================================================
+
+@app.get("/api/sessions")
+def list_sessions():
 
     db = SessionLocal()
 
@@ -414,122 +307,27 @@ def database_info():
 
         sessions = (
             db.query(ECGSession)
-            .count()
-        )
-
-        measurements = (
-            db.query(ECGMeasurement)
-            .count()
-        )
-
-        quality = (
-            db.query(
-                ECGSignalQuality
-            )
-            .count()
-        )
-
-        return {
-
-            "database_path":
-                get_database_path(),
-
-            "sessions":
-                sessions,
-
-            "measurements":
-                measurements,
-
-            "signal_quality":
-                quality,
-        }
-
-    finally:
-
-        db.close()
-
-
-# ============================================================
-# GET ALL SESSIONS
-# ============================================================
-
-@app.get("/api/sessions")
-def get_sessions(
-    limit: int = 20,
-):
-
-    limit = max(
-        1,
-        min(limit, 100),
-    )
-
-    db = SessionLocal()
-
-    try:
-
-        rows = (
-            db.query(ECGSession)
             .order_by(
-                desc(
-                    ECGSession.started_at
-                )
+                ECGSession.started_at.desc()
             )
-            .limit(limit)
             .all()
         )
 
-        result = []
-
-        for row in rows:
-
-            result.append({
-
-                "session_id":
-                    row.session_id,
-
-                "device_id":
-                    row.device_id,
-
-                "started_at":
-                    row.started_at.isoformat(),
-
-                "last_packet_at":
-                    (
-                        row.last_packet_at.isoformat()
-                        if row.last_packet_at
-                        else None
-                    ),
-
-                "ended_at":
-                    (
-                        row.ended_at.isoformat()
-                        if row.ended_at
-                        else None
-                    ),
-
-                "sampling_rate":
-                    row.sampling_rate,
-
-                "samples_received":
-                    row.samples_received,
-
-                "packets_received":
-                    row.packets_received,
-
-                "status":
-                    row.status,
-            })
-
-        return {
-
-            "status": "success",
-
-            "count":
-                len(result),
-
-            "sessions":
-                result,
-        }
+        return [
+            {
+                "session_id": s.session_id,
+                "device_id": s.device_id,
+                "lead": s.lead,
+                "sampling_rate": s.sampling_rate,
+                "started_at": s.started_at,
+                "last_packet_at": s.last_packet_at,
+                "ended_at": s.ended_at,
+                "samples_received": s.samples_received,
+                "packets_received": s.packets_received,
+                "status": s.status,
+            }
+            for s in sessions
+        ]
 
     finally:
 
@@ -537,11 +335,13 @@ def get_sessions(
 
 
 # ============================================================
-# GET SESSION BY DEVICE
+# DEVICE SESSIONS
 # ============================================================
 
-@app.get("/api/session/device/{device_id}")
-def get_latest_device_session(
+@app.get(
+    "/api/session/device/{device_id}"
+)
+def device_sessions(
     device_id: str,
 ):
 
@@ -549,69 +349,32 @@ def get_latest_device_session(
 
     try:
 
-        session = (
+        sessions = (
             db.query(ECGSession)
             .filter(
                 ECGSession.device_id
                 == device_id
             )
             .order_by(
-                desc(
-                    ECGSession.started_at
-                )
+                ECGSession.started_at.desc()
             )
-            .first()
+            .all()
         )
 
-        if not session:
-
-            return {
-                "status": "not_found",
-                "device_id": device_id,
+        return [
+            {
+                "session_id": s.session_id,
+                "device_id": s.device_id,
+                "lead": s.lead,
+                "sampling_rate": s.sampling_rate,
+                "started_at": s.started_at,
+                "ended_at": s.ended_at,
+                "samples_received": s.samples_received,
+                "packets_received": s.packets_received,
+                "status": s.status,
             }
-
-        return {
-
-            "status": "success",
-
-            "session": {
-
-                "session_id":
-                    session.session_id,
-
-                "device_id":
-                    session.device_id,
-
-                "started_at":
-                    session.started_at.isoformat(),
-
-                "last_packet_at":
-                    (
-                        session.last_packet_at.isoformat()
-                        if session.last_packet_at
-                        else None
-                    ),
-
-                "ended_at":
-                    (
-                        session.ended_at.isoformat()
-                        if session.ended_at
-                        else None
-                    ),
-
-                "sampling_rate":
-                    session.sampling_rate,
-
-                "samples_received":
-                    session.samples_received,
-
-                "packets_received":
-                    session.packets_received,
-
-                "status":
-                    session.status,
-            },
-        }
+            for s in sessions
+        ]
 
     finally:
 
@@ -619,21 +382,15 @@ def get_latest_device_session(
 
 
 # ============================================================
-# GET SESSION MEASUREMENTS
+# MEASUREMENTS
 # ============================================================
 
 @app.get(
     "/api/session/{session_id}/measurements"
 )
-def get_session_measurements(
+def session_measurements(
     session_id: str,
-    limit: int = 100,
 ):
-
-    limit = max(
-        1,
-        min(limit, 500),
-    )
 
     db = SessionLocal()
 
@@ -648,64 +405,26 @@ def get_session_measurements(
                 == session_id
             )
             .order_by(
-                desc(
-                    ECGMeasurement.recorded_at
-                )
+                ECGMeasurement.recorded_at.desc()
             )
-            .limit(limit)
             .all()
         )
 
-        result = []
-
-        for row in reversed(rows):
-
-            result.append({
-
-                "recorded_at":
-                    row.recorded_at.isoformat(),
-
-                "heart_rate_bpm":
-                    row.heart_rate_bpm,
-
-                "rr_interval_ms":
-                    row.rr_interval_ms,
-
-                "p_duration_ms":
-                    row.p_duration_ms,
-
-                "pr_interval_ms":
-                    row.pr_interval_ms,
-
-                "qrs_duration_ms":
-                    row.qrs_duration_ms,
-
-                "qt_interval_ms":
-                    row.qt_interval_ms,
-
-                "qtc_ms":
-                    row.qtc_ms,
-
-                "confidence":
-                    row.confidence,
-
-                "measurement_status":
-                    row.measurement_status,
-            })
-
-        return {
-
-            "status": "success",
-
-            "session_id":
-                session_id,
-
-            "count":
-                len(result),
-
-            "measurements":
-                result,
-        }
+        return [
+            {
+                "recorded_at": row.recorded_at,
+                "heart_rate_bpm": row.heart_rate_bpm,
+                "rr_interval_ms": row.rr_interval_ms,
+                "p_duration_ms": row.p_duration_ms,
+                "pr_interval_ms": row.pr_interval_ms,
+                "qrs_duration_ms": row.qrs_duration_ms,
+                "qt_interval_ms": row.qt_interval_ms,
+                "qtc_ms": row.qtc_ms,
+                "confidence": row.confidence,
+                "measurement_status": row.measurement_status,
+            }
+            for row in rows
+        ]
 
     finally:
 
@@ -713,7 +432,55 @@ def get_session_measurements(
 
 
 # ============================================================
-# RECEIVE ECG
+# SIGNAL QUALITY
+# ============================================================
+
+@app.get(
+    "/api/session/{session_id}/signal-quality"
+)
+def session_signal_quality(
+    session_id: str,
+):
+
+    db = SessionLocal()
+
+    try:
+
+        rows = (
+            db.query(
+                ECGSignalQuality
+            )
+            .filter(
+                ECGSignalQuality.session_id
+                == session_id
+            )
+            .order_by(
+                ECGSignalQuality.recorded_at.desc()
+            )
+            .all()
+        )
+
+        return [
+            {
+                "recorded_at": row.recorded_at,
+                "score": row.score,
+                "label": row.label,
+                "baseline_wander": row.baseline_wander,
+                "noise_rms": row.noise_rms,
+                "clipping_ratio": row.clipping_ratio,
+                "peak_count": row.peak_count,
+                "notes": row.notes,
+            }
+            for row in rows
+        ]
+
+    finally:
+
+        db.close()
+
+
+# ============================================================
+# ECG PACKET
 # ============================================================
 
 @app.post("/api/ecg")
@@ -721,350 +488,664 @@ async def receive_ecg(
     data: ECGData,
 ):
 
-    if not data.samples:
-
-        return {
-            "status": "ignored",
-            "message":
-                "No ECG samples received.",
-        }
-
-
-    # --------------------------------------------------------
-    # Get/create persistent session
-    # --------------------------------------------------------
-
-    session = get_or_create_session(
-        data.device_id,
-        data.sampling_rate,
-    )
-
-
-    now = utc_now()
-
-
-    # --------------------------------------------------------
-    # Update persistent session
-    # --------------------------------------------------------
-
     db = SessionLocal()
 
     try:
 
-        database_session = (
-            db.query(ECGSession)
-            .filter(
-                ECGSession.session_id
-                == session.session_id
-            )
-            .first()
+        session = get_or_create_session(
+            db,
+            data.device_id,
+            data.sampling_rate,
         )
 
-        if not database_session:
+        now = utc_now()
 
-            raise RuntimeError(
-                "ECG session disappeared from database."
-            )
+        samples = [
+            float(value)
+            for value in data.samples
+            if np.isfinite(value)
+        ]
 
+        if not samples:
 
-        database_session.last_packet_at = now
-
-        database_session.sampling_rate = (
-            data.sampling_rate
-        )
-
-        database_session.samples_received += (
-            len(data.samples)
-        )
-
-        database_session.packets_received += 1
-
-        database_session.status = "active"
-
-        db.commit()
-
-
-    except Exception:
-
-        db.rollback()
-
-        raise
-
-    finally:
-
-        db.close()
-
-
-    # --------------------------------------------------------
-    # Analysis buffer
-    # --------------------------------------------------------
-
-    buffer = get_analysis_buffer(
-        data.device_id,
-        data.sampling_rate,
-    )
-
-    buffer.extend(
-        data.samples
-    )
-
-    analysis_samples = list(
-        buffer
-    )
-
-
-    # --------------------------------------------------------
-    # ECG analysis
-    # --------------------------------------------------------
-
-    analysis = analyze_ecg(
-        analysis_samples,
-        data.sampling_rate,
-    )
-
-
-    measurements = (
-        analysis.get(
-            "measurements",
-            {}
-        )
-    )
-
-    quality = (
-        analysis.get(
-            "signal_quality",
-            {}
-        )
-    )
-
-
-    # --------------------------------------------------------
-    # Persist calculated ECG measurements
-    # --------------------------------------------------------
-
-    if (
-        measurements.get(
-            "heart_rate_bpm"
-        )
-        is not None
-    ):
-
-        db = SessionLocal()
-
-        try:
-
-            measurement = ECGMeasurement(
-
-                session_id=
-                    session.session_id,
-
-                recorded_at=now,
-
-                heart_rate_bpm=
-                    measurements.get(
-                        "heart_rate_bpm"
-                    ),
-
-                rr_interval_ms=
-                    measurements.get(
-                        "rr_interval_ms"
-                    ),
-
-                p_duration_ms=
-                    measurements.get(
-                        "p_duration_ms"
-                    ),
-
-                pr_interval_ms=
-                    measurements.get(
-                        "pr_interval_ms"
-                    ),
-
-                qrs_duration_ms=
-                    measurements.get(
-                        "qrs_duration_ms"
-                    ),
-
-                qt_interval_ms=
-                    measurements.get(
-                        "qt_interval_ms"
-                    ),
-
-                qtc_ms=
-                    measurements.get(
-                        "qtc_ms"
-                    ),
-
-                confidence=
-                    measurements.get(
-                        "confidence"
-                    ),
-
-                measurement_status=
-                    measurements.get(
-                        "status"
-                    ),
+            raise HTTPException(
+                status_code=400,
+                detail="No valid ECG samples received.",
             )
 
-            db.add(
-                measurement
-            )
+        # ----------------------------------------------------
+        # RAW PACKET
+        # ----------------------------------------------------
 
-            db.commit()
+        raw_packet = ECGRawPacket(
+            session_id=session.session_id,
+            device_id=data.device_id,
+            received_at=now,
+            sampling_rate=data.sampling_rate,
+            lead_off=data.lead_off,
+            samples_json=json.dumps(
+                samples
+            ),
+            sample_count=len(samples),
+        )
 
-        except Exception:
+        db.add(raw_packet)
 
-            db.rollback()
+        # ----------------------------------------------------
+        # SESSION UPDATE
+        # ----------------------------------------------------
 
-            raise
+        session.last_packet_at = now
 
-        finally:
+        session.packets_received += 1
 
-            db.close()
+        session.samples_received += len(
+            samples
+        )
 
+        # ----------------------------------------------------
+        # ANALYSIS BUFFER
+        # ----------------------------------------------------
 
-    # --------------------------------------------------------
-    # Persist signal quality
-    # --------------------------------------------------------
+        buffer = analysis_buffers[
+            data.device_id
+        ]
 
-    db = SessionLocal()
+        buffer.extend(samples)
 
-    try:
+        analysis = analyze_ecg(
+            list(buffer),
+            data.sampling_rate,
+        )
 
-        quality_record = ECGSignalQuality(
+        measurement_data = (
+            analysis.measurement
+        )
 
-            session_id=
-                session.session_id,
+        quality_data = (
+            analysis.signal_quality
+        )
 
+        # ----------------------------------------------------
+        # MEASUREMENT
+        # ----------------------------------------------------
+
+        measurement = ECGMeasurement(
+            session_id=session.session_id,
             recorded_at=now,
-
-            score=
-                quality.get(
-                    "score"
-                ),
-
-            label=
-                quality.get(
-                    "label"
-                ),
-
-            baseline_wander=
-                quality.get(
-                    "baseline_wander"
-                ),
-
-            noise_rms=
-                quality.get(
-                    "noise_rms"
-                ),
-
-            clipping_ratio=
-                quality.get(
-                    "clipping_ratio"
-                ),
-
-            peak_count=
-                quality.get(
-                    "peak_count"
-                ),
-
-            notes="\n".join(
-                quality.get(
-                    "notes",
-                    []
+            heart_rate_bpm=(
+                analysis.heart_rate_bpm
+            ),
+            rr_interval_ms=(
+                measurement_data.get(
+                    "rr_interval_ms"
+                )
+            ),
+            p_duration_ms=(
+                measurement_data.get(
+                    "p_duration_ms"
+                )
+            ),
+            pr_interval_ms=(
+                measurement_data.get(
+                    "pr_interval_ms"
+                )
+            ),
+            qrs_duration_ms=(
+                measurement_data.get(
+                    "qrs_duration_ms"
+                )
+            ),
+            qt_interval_ms=(
+                measurement_data.get(
+                    "qt_interval_ms"
+                )
+            ),
+            qtc_ms=(
+                measurement_data.get(
+                    "qtc_ms"
+                )
+            ),
+            confidence=(
+                measurement_data.get(
+                    "confidence"
+                )
+            ),
+            measurement_status=(
+                measurement_data.get(
+                    "status"
                 )
             ),
         )
 
-        db.add(
-            quality_record
+        db.add(measurement)
+
+        # ----------------------------------------------------
+        # SIGNAL QUALITY
+        # ----------------------------------------------------
+
+        quality = ECGSignalQuality(
+            session_id=session.session_id,
+            recorded_at=now,
+            score=quality_data.get(
+                "score"
+            ),
+            label=quality_data.get(
+                "label"
+            ),
+            baseline_wander=quality_data.get(
+                "baseline_wander"
+            ),
+            noise_rms=quality_data.get(
+                "noise_rms"
+            ),
+            clipping_ratio=quality_data.get(
+                "clipping_ratio"
+            ),
+            peak_count=quality_data.get(
+                "peak_count"
+            ),
+            notes=json.dumps(
+                quality_data.get(
+                    "notes",
+                    [],
+                )
+            ),
         )
+
+        db.add(quality)
 
         db.commit()
 
-    except Exception:
+        # ----------------------------------------------------
+        # WEBSOCKET
+        # ----------------------------------------------------
+
+        websocket_payload = {
+            "type": "ecg",
+
+            "session_id": (
+                session.session_id
+            ),
+
+            "device_id": (
+                data.device_id
+            ),
+
+            "sampling_rate": (
+                data.sampling_rate
+            ),
+
+            "lead": "II",
+
+            "lead_off": data.lead_off,
+
+            "samples": samples,
+
+            "analysis": {
+                "r_peaks": (
+                    analysis.r_peaks
+                ),
+
+                "rr_intervals_ms": (
+                    analysis.rr_intervals_ms
+                ),
+
+                "heart_rate_bpm": (
+                    analysis.heart_rate_bpm
+                ),
+
+                "measurement": (
+                    measurement_data
+                ),
+
+                "signal_quality": (
+                    quality_data
+                ),
+            },
+        }
+
+        await broadcast(
+            websocket_payload
+        )
+
+        return {
+            "status": "received",
+
+            "session_id": (
+                session.session_id
+            ),
+
+            "samples_received": len(
+                samples
+            ),
+
+            "total_samples": (
+                session.samples_received
+            ),
+
+            "total_packets": (
+                session.packets_received
+            ),
+
+            "heart_rate_bpm": (
+                analysis.heart_rate_bpm
+            ),
+
+            "signal_quality": (
+                quality_data.get(
+                    "score"
+                )
+            ),
+        }
+
+    except HTTPException:
+
+        db.rollback()
+        raise
+
+    except Exception as exc:
 
         db.rollback()
 
-        raise
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
 
     finally:
 
         db.close()
 
 
-    # --------------------------------------------------------
-    # WebSocket payload
-    # --------------------------------------------------------
+# ============================================================
+# GENERATE BEATS FOR SESSION
+# ============================================================
 
-    websocket_payload = {
+@app.post(
+    "/api/session/{session_id}/generate-beats"
+)
+def generate_session_beats(
+    session_id: str,
+):
 
-        "type": "ecg",
+    db = SessionLocal()
 
-        "device_id":
-            data.device_id,
+    try:
 
-        "session_id":
-            session.session_id,
+        session = (
+            db.query(ECGSession)
+            .filter(
+                ECGSession.session_id
+                == session_id
+            )
+            .first()
+        )
 
-        "sampling_rate":
-            data.sampling_rate,
+        if not session:
 
-        "samples":
-            data.samples,
+            raise HTTPException(
+                status_code=404,
+                detail="Session not found.",
+            )
 
-        "timestamp_ms":
-            data.timestamp_ms,
+        # ----------------------------------------------------
+        # LOAD RAW PACKETS IN CHRONOLOGICAL ORDER
+        # ----------------------------------------------------
 
-        "sequence":
-            data.sequence,
+        packets = (
+            db.query(ECGRawPacket)
+            .filter(
+                ECGRawPacket.session_id
+                == session_id
+            )
+            .order_by(
+                ECGRawPacket.received_at.asc(),
+                ECGRawPacket.id.asc(),
+            )
+            .all()
+        )
 
-        "lead_off":
-            data.lead_off,
+        if not packets:
 
-        "lead":
-            "II",
+            raise HTTPException(
+                status_code=404,
+                detail="No raw ECG packets found.",
+            )
 
-        "analysis":
-            analysis,
-    }
+        all_samples = []
 
+        for packet in packets:
 
-    await manager.broadcast(
-        websocket_payload
-    )
+            try:
 
+                values = json.loads(
+                    packet.samples_json
+                )
 
-    print(
-        f"[ECG] "
-        f"device={data.device_id} "
-        f"session={session.session_id} "
-        f"samples={len(data.samples)} "
-        f"total={database_session.samples_received if 'database_session' in locals() else '?'} "
-        f"HR={measurements.get('heart_rate_bpm')} "
-        f"quality={quality.get('label')}"
-    )
+                all_samples.extend(
+                    float(value)
+                    for value in values
+                    if np.isfinite(value)
+                )
 
+            except Exception:
 
-    return {
+                continue
 
-        "status":
-            "success",
+        if len(all_samples) < (
+            session.sampling_rate
+        ):
 
-        "device_id":
-            data.device_id,
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "At least one second of "
+                    "ECG data is required."
+                ),
+            )
 
-        "session_id":
-            session.session_id,
+        # ----------------------------------------------------
+        # COMPLETE SESSION ANALYSIS
+        # ----------------------------------------------------
 
-        "samples_received":
-            len(data.samples),
+        analysis = analyze_ecg(
+            all_samples,
+            session.sampling_rate,
+        )
 
-        "analysis_status":
-            analysis.get(
-                "status"
+        if not analysis.r_peaks:
+
+            return {
+                "status": "no_beats_detected",
+                "session_id": session_id,
+                "beats_created": 0,
+            }
+
+        # ----------------------------------------------------
+        # EXTRACT BEATS
+        # ----------------------------------------------------
+
+        beats = extract_beats(
+            analysis.filtered_signal,
+            analysis.r_peaks,
+            sampling_rate=session.sampling_rate,
+            quality_threshold=40.0,
+        )
+
+        # ----------------------------------------------------
+        # REMOVE OLD GENERATED BEATS
+        # ----------------------------------------------------
+
+        (
+            db.query(ECGBeat)
+            .filter(
+                ECGBeat.session_id
+                == session_id
+            )
+            .delete(
+                synchronize_session=False
+            )
+        )
+
+        # ----------------------------------------------------
+        # SAVE NEW BEATS
+        # ----------------------------------------------------
+
+        for beat in beats:
+
+            db.add(
+                ECGBeat(
+                    session_id=session_id,
+                    beat_index=beat.beat_index,
+                    r_peak_sample=beat.r_peak_sample,
+                    start_sample=beat.start_sample,
+                    end_sample=beat.end_sample,
+                    rr_interval_ms=beat.rr_interval_ms,
+                    heart_rate_bpm=beat.heart_rate_bpm,
+                    quality_score=beat.quality_score,
+                    sampling_rate=session.sampling_rate,
+                    lead=session.lead,
+                    sample_count=len(
+                        beat.samples
+                    ),
+                    samples_json=json.dumps(
+                        beat.samples
+                    ),
+                )
+            )
+
+        db.commit()
+
+        return {
+            "status": "success",
+            "session_id": session_id,
+            "sampling_rate": session.sampling_rate,
+            "lead": session.lead,
+            "total_raw_samples": len(
+                all_samples
             ),
-    }
+            "r_peaks_detected": len(
+                analysis.r_peaks
+            ),
+            "beats_created": len(
+                beats
+            ),
+        }
+
+    except HTTPException:
+
+        db.rollback()
+        raise
+
+    except Exception as exc:
+
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
+
+    finally:
+
+        db.close()
+
+
+# ============================================================
+# GET EXTRACTED BEATS
+# ============================================================
+
+@app.get(
+    "/api/session/{session_id}/beats"
+)
+def get_session_beats(
+    session_id: str,
+    limit: int = 100,
+    offset: int = 0,
+):
+
+    limit = max(
+        1,
+        min(limit, 1000),
+    )
+
+    offset = max(
+        0,
+        offset,
+    )
+
+    db = SessionLocal()
+
+    try:
+
+        session = (
+            db.query(ECGSession)
+            .filter(
+                ECGSession.session_id
+                == session_id
+            )
+            .first()
+        )
+
+        if not session:
+
+            raise HTTPException(
+                status_code=404,
+                detail="Session not found.",
+            )
+
+        query = (
+            db.query(ECGBeat)
+            .filter(
+                ECGBeat.session_id
+                == session_id
+            )
+            .order_by(
+                ECGBeat.beat_index.asc()
+            )
+        )
+
+        total = query.count()
+
+        rows = (
+            query
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+
+        return {
+            "session_id": session_id,
+            "sampling_rate": (
+                session.sampling_rate
+            ),
+            "lead": session.lead,
+            "total_beats": total,
+            "limit": limit,
+            "offset": offset,
+            "beats": [
+                {
+                    "beat_index": (
+                        row.beat_index
+                    ),
+
+                    "r_peak_sample": (
+                        row.r_peak_sample
+                    ),
+
+                    "start_sample": (
+                        row.start_sample
+                    ),
+
+                    "end_sample": (
+                        row.end_sample
+                    ),
+
+                    "rr_interval_ms": (
+                        row.rr_interval_ms
+                    ),
+
+                    "heart_rate_bpm": (
+                        row.heart_rate_bpm
+                    ),
+
+                    "quality_score": (
+                        row.quality_score
+                    ),
+
+                    "sample_count": (
+                        row.sample_count
+                    ),
+
+                    "samples": json.loads(
+                        row.samples_json
+                    ),
+                }
+                for row in rows
+            ],
+        }
+
+    finally:
+
+        db.close()
+
+
+# ============================================================
+# ML DATASET
+# ============================================================
+
+@app.get(
+    "/api/session/{session_id}/ml-dataset"
+)
+def get_ml_dataset(
+    session_id: str,
+):
+
+    db = SessionLocal()
+
+    try:
+
+        session = (
+            db.query(ECGSession)
+            .filter(
+                ECGSession.session_id
+                == session_id
+            )
+            .first()
+        )
+
+        if not session:
+
+            raise HTTPException(
+                status_code=404,
+                detail="Session not found.",
+            )
+
+        rows = (
+            db.query(ECGBeat)
+            .filter(
+                ECGBeat.session_id
+                == session_id
+            )
+            .order_by(
+                ECGBeat.beat_index.asc()
+            )
+            .all()
+        )
+
+        beats = []
+
+        for row in rows:
+
+            # Reconstruct the lightweight
+            # ExtractedBeat-like structure.
+            class Beat:
+                pass
+
+            beat = Beat()
+
+            beat.samples = json.loads(
+                row.samples_json
+            )
+
+            beats.append(beat)
+
+        dataset = build_ml_dataset(
+            beats,
+            sampling_rate=session.sampling_rate,
+        )
+
+        return {
+            "session_id": session_id,
+            "lead": session.lead,
+            "device_id": session.device_id,
+            **dataset,
+        }
+
+    finally:
+
+        db.close()
 
 
 # ============================================================
@@ -1076,7 +1157,9 @@ async def websocket_ecg(
     websocket: WebSocket,
 ):
 
-    await manager.connect(
+    await websocket.accept()
+
+    connected_clients.add(
         websocket
     )
 
@@ -1084,20 +1167,92 @@ async def websocket_ecg(
 
         while True:
 
-            await websocket.receive()
+            await websocket.receive_text()
 
-    except WebSocketDisconnect:
+    except Exception:
 
-        manager.disconnect(
+        pass
+
+    finally:
+
+        connected_clients.discard(
             websocket
         )
 
-    except Exception as error:
 
-        print(
-            f"[WebSocket] Error: {error}"
-        )
+# ============================================================
+# STARTUP
+# ============================================================
 
-        manager.disconnect(
-            websocket
-        )
+@app.on_event("startup")
+def startup():
+
+    print()
+    print("=" * 50)
+    print("ECG MONITORING BACKEND")
+    print("=" * 50)
+
+    print(
+        "Initializing SQLite database..."
+    )
+
+    create_tables()
+
+    info = get_database_info()
+
+    print(
+        f"Database: {info['database']}"
+    )
+
+    print(
+        f"Sessions: {info['sessions']}"
+    )
+
+    print(
+        f"Measurements: "
+        f"{info['measurements']}"
+    )
+
+    print(
+        f"Signal quality: "
+        f"{info['signal_quality']}"
+    )
+
+    print(
+        f"Raw packets: "
+        f"{info['raw_packets']}"
+    )
+
+    print(
+        f"ECG beats: "
+        f"{info['beats']}"
+    )
+
+    print()
+    print(
+        "FastAPI: http://0.0.0.0:9000"
+    )
+
+    print(
+        "ECG POST: /api/ecg"
+    )
+
+    print(
+        "WebSocket: /ws/ecg"
+    )
+
+    print("=" * 50)
+    print()
+
+
+# ============================================================
+# SHUTDOWN
+# ============================================================
+
+@app.on_event("shutdown")
+def shutdown():
+
+    print()
+    print(
+        "ECG backend shutting down."
+    )
