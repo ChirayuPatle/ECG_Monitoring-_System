@@ -9,6 +9,7 @@ from sqlalchemy import (
     Float,
     DateTime,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -18,18 +19,25 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 # ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
+
 DATABASE_PATH = BASE_DIR / "ecg_monitor.db"
-DATABASE_URL = f"sqlite:///{DATABASE_PATH.as_posix()}"
+
+DATABASE_URL = (
+    f"sqlite:///{DATABASE_PATH.as_posix()}"
+)
+
 
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False},
+    connect_args={
+        "check_same_thread": False,
+    },
 )
+
 
 Base = declarative_base()
 
-# IMPORTANT:
-# Main.py imports this directly.
+
 SessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False,
@@ -42,9 +50,13 @@ SessionLocal = sessionmaker(
 # ============================================================
 
 class ECGSession(Base):
+
     __tablename__ = "ecg_sessions"
 
-    id = Column(Integer, primary_key=True)
+    id = Column(
+        Integer,
+        primary_key=True,
+    )
 
     session_id = Column(
         String(64),
@@ -64,9 +76,13 @@ class ECGSession(Base):
         nullable=False,
     )
 
-    last_packet_at = Column(DateTime)
+    last_packet_at = Column(
+        DateTime,
+    )
 
-    ended_at = Column(DateTime)
+    ended_at = Column(
+        DateTime,
+    )
 
     sampling_rate = Column(
         Integer,
@@ -100,13 +116,17 @@ class ECGSession(Base):
 
 
 # ============================================================
-# ECG MEASUREMENT / ANALYSIS SNAPSHOT
+# ECG MEASUREMENTS
 # ============================================================
 
 class ECGMeasurement(Base):
+
     __tablename__ = "ecg_measurements"
 
-    id = Column(Integer, primary_key=True)
+    id = Column(
+        Integer,
+        primary_key=True,
+    )
 
     session_id = Column(
         String(64),
@@ -119,21 +139,37 @@ class ECGMeasurement(Base):
         nullable=False,
     )
 
-    hr = Column(Float)
+    hr = Column(
+        Float,
+    )
 
-    rr = Column(Float)
+    rr = Column(
+        Float,
+    )
 
-    p_duration = Column(Float)
+    p_duration = Column(
+        Float,
+    )
 
-    pr = Column(Float)
+    pr = Column(
+        Float,
+    )
 
-    qrs = Column(Float)
+    qrs = Column(
+        Float,
+    )
 
-    qt = Column(Float)
+    qt = Column(
+        Float,
+    )
 
-    qtc = Column(Float)
+    qtc = Column(
+        Float,
+    )
 
-    confidence = Column(Float)
+    confidence = Column(
+        Float,
+    )
 
     measurement_status = Column(
         String(50),
@@ -145,9 +181,13 @@ class ECGMeasurement(Base):
 # ============================================================
 
 class ECGSignalQuality(Base):
+
     __tablename__ = "ecg_signal_quality"
 
-    id = Column(Integer, primary_key=True)
+    id = Column(
+        Integer,
+        primary_key=True,
+    )
 
     session_id = Column(
         String(64),
@@ -160,19 +200,33 @@ class ECGSignalQuality(Base):
         nullable=False,
     )
 
-    score = Column(Float)
+    score = Column(
+        Float,
+    )
 
-    label = Column(String(30))
+    label = Column(
+        String(30),
+    )
 
-    baseline_wander = Column(Float)
+    baseline_wander = Column(
+        Float,
+    )
 
-    noise_rms = Column(Float)
+    noise_rms = Column(
+        Float,
+    )
 
-    clipping_ratio = Column(Float)
+    clipping_ratio = Column(
+        Float,
+    )
 
-    peak_count = Column(Integer)
+    peak_count = Column(
+        Integer,
+    )
 
-    notes = Column(Text)
+    notes = Column(
+        Text,
+    )
 
 
 # ============================================================
@@ -180,9 +234,13 @@ class ECGSignalQuality(Base):
 # ============================================================
 
 class ECGRawPacket(Base):
+
     __tablename__ = "ecg_raw_packets"
 
-    id = Column(Integer, primary_key=True)
+    id = Column(
+        Integer,
+        primary_key=True,
+    )
 
     session_id = Column(
         String(64),
@@ -227,9 +285,13 @@ class ECGRawPacket(Base):
 # ============================================================
 
 class ECGBeat(Base):
+
     __tablename__ = "ecg_beats"
 
-    id = Column(Integer, primary_key=True)
+    id = Column(
+        Integer,
+        primary_key=True,
+    )
 
     session_id = Column(
         String(64),
@@ -237,19 +299,33 @@ class ECGBeat(Base):
         nullable=False,
     )
 
-    beat_index = Column(Integer)
+    beat_index = Column(
+        Integer,
+    )
 
-    r_peak_sample = Column(Integer)
+    r_peak_sample = Column(
+        Integer,
+    )
 
-    start_sample = Column(Integer)
+    start_sample = Column(
+        Integer,
+    )
 
-    end_sample = Column(Integer)
+    end_sample = Column(
+        Integer,
+    )
 
-    rr_interval_ms = Column(Float)
+    rr_interval_ms = Column(
+        Float,
+    )
 
-    heart_rate_bpm = Column(Float)
+    heart_rate_bpm = Column(
+        Float,
+    )
 
-    quality_score = Column(Float)
+    quality_score = Column(
+        Float,
+    )
 
     sampling_rate = Column(
         Integer,
@@ -262,19 +338,103 @@ class ECGBeat(Base):
         nullable=False,
     )
 
-    sample_count = Column(Integer)
+    sample_count = Column(
+        Integer,
+    )
 
-    samples_json = Column(Text)
+    samples_json = Column(
+        Text,
+    )
 
-    created_at = Column(DateTime)
+    created_at = Column(
+        DateTime,
+    )
 
 
 # ============================================================
-# DATABASE INITIALIZATION
+# SMART ECG ML PREDICTIONS
+# ============================================================
+
+class ECGMLPrediction(Base):
+
+    __tablename__ = "ecg_ml_predictions"
+
+    id = Column(
+        Integer,
+        primary_key=True,
+    )
+
+    session_id = Column(
+        String(64),
+        index=True,
+        nullable=False,
+    )
+
+    device_id = Column(
+        String(100),
+        index=True,
+        nullable=False,
+    )
+
+    prediction_index = Column(
+        Integer,
+        nullable=False,
+    )
+
+    r_peak_sample = Column(
+        Integer,
+        nullable=False,
+    )
+
+    r_peak_time_seconds = Column(
+        Float,
+        nullable=False,
+    )
+
+    predicted_class = Column(
+        String(5),
+        nullable=False,
+    )
+
+    confidence = Column(
+        Float,
+        nullable=False,
+    )
+
+    probabilities_json = Column(
+        Text,
+        nullable=False,
+    )
+
+    model_name = Column(
+        String(100),
+        nullable=False,
+        default="SmartECG-HD",
+    )
+
+    recorded_at = Column(
+        DateTime,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id",
+            "r_peak_sample",
+            name="uq_ml_session_r_peak",
+        ),
+    )
+
+
+# ============================================================
+# CREATE TABLES
 # ============================================================
 
 def create_tables():
-    Base.metadata.create_all(bind=engine)
+
+    Base.metadata.create_all(
+        bind=engine,
+    )
 
 
 # ============================================================
@@ -282,25 +442,65 @@ def create_tables():
 # ============================================================
 
 def get_database_info():
+
     create_tables()
 
     db = SessionLocal()
 
     try:
+
         return {
-            "path": str(DATABASE_PATH),
-            "exists": DATABASE_PATH.exists(),
+            "path": str(
+                DATABASE_PATH
+            ),
+
+            "exists": (
+                DATABASE_PATH.exists()
+            ),
+
             "size_bytes": (
                 DATABASE_PATH.stat().st_size
                 if DATABASE_PATH.exists()
                 else 0
             ),
-            "sessions": db.query(ECGSession).count(),
-            "measurements": db.query(ECGMeasurement).count(),
-            "signal_quality": db.query(ECGSignalQuality).count(),
-            "raw_packets": db.query(ECGRawPacket).count(),
-            "beats": db.query(ECGBeat).count(),
+
+            "sessions": (
+                db.query(
+                    ECGSession
+                ).count()
+            ),
+
+            "measurements": (
+                db.query(
+                    ECGMeasurement
+                ).count()
+            ),
+
+            "signal_quality": (
+                db.query(
+                    ECGSignalQuality
+                ).count()
+            ),
+
+            "raw_packets": (
+                db.query(
+                    ECGRawPacket
+                ).count()
+            ),
+
+            "beats": (
+                db.query(
+                    ECGBeat
+                ).count()
+            ),
+
+            "ml_predictions": (
+                db.query(
+                    ECGMLPrediction
+                ).count()
+            ),
         }
 
     finally:
+
         db.close()
