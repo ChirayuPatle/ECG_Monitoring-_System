@@ -34,5 +34,3 @@
   "device_id": "test_device",
   "samples_received": 10
 }`
-
-- 
