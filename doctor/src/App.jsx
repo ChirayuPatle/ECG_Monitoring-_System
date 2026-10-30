@@ -497,6 +497,468 @@ function ECGWaveform({ sampleRate, leadOff, samplesRef }) {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Patient Report Modal                                                       */
+/* -------------------------------------------------------------------------- */
+
+// ---------------------------------------------------------------------------
+// DEMO_DATA — static, frontend-only object.
+// This is NEVER sent to the backend, stored in SQLite, or used in any API
+// request. It exists solely so the modal layout and print styling can be
+// reviewed without a live ECG session.
+// ---------------------------------------------------------------------------
+const DEMO_DATA = {
+  generated_at: new Date().toISOString(),
+  session: {
+    session_id: "DEMO-0000-0000-0000",
+    device_id: "ecg_esp8266_01",
+    lead: "single-channel",
+    status: "active",
+    started_at: new Date(Date.now() - 45 * 60 * 1000).toISOString(),
+    ended_at: null,
+    last_packet_at: new Date().toISOString(),
+    sampling_rate: 200,
+    samples_received: 540000,
+    packets_received: 10800,
+  },
+  measurements: {
+    count: 2700,
+    avg_heart_rate_bpm: 74,
+    min_heart_rate_bpm: 58,
+    max_heart_rate_bpm: 102,
+    latest_heart_rate_bpm: 76,
+    latest_recorded_at: new Date(Date.now() - 2000).toISOString(),
+    avg_rr_interval_ms: 811,
+    latest_rr_interval_ms: 789,
+  },
+  ml: {
+    total_predictions: 2700,
+    avg_confidence_pct: 94.2,
+    last_predicted_class: "N",
+    last_confidence_pct: 97.1,
+    model_name: "SmartECG-HD v2.1 (demo)",
+    class_distribution: {
+      N: { count: 2538, percent: 94 },
+      S: { count: 81,   percent: 3  },
+      V: { count: 54,   percent: 2  },
+      F: { count: 27,   percent: 1  },
+      Q: { count: 0,    percent: 0  },
+    },
+  },
+  signal_quality: {
+    score: 88,
+    label: "Good",
+    baseline_wander: 0.042,
+    noise_rms: 0.018,
+    peak_count: 2700,
+    recorded_at: new Date(Date.now() - 5000).toISOString(),
+  },
+};
+
+
+const ML_CLASS_LABELS = {
+  N: "Normal",
+  S: "Supraventricular",
+  V: "Ventricular",
+  F: "Fusion",
+  Q: "Unclassified",
+};
+
+function na(value, unit = "") {
+  if (value === null || value === undefined || value === "") {
+    return "Not available";
+  }
+  return `${value}${unit}`;
+}
+
+function formatIso(iso) {
+  if (!iso) return "Not available";
+  try {
+    return new Date(iso).toLocaleString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  } catch {
+    return iso;
+  }
+}
+
+// demo=true → use DEMO_DATA locally; skips all fetch/session logic entirely.
+function PatientReportModal({ sessionId, onClose, demo = false }) {
+  const [data, setData] = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState(null);
+
+  React.useEffect(() => {
+    // Demo mode: load static placeholder data — no network request made.
+    if (demo) {
+      setData(DEMO_DATA);
+      setLoading(false);
+      return;
+    }
+
+    if (!sessionId) {
+      setError("No active session available to generate a report.");
+      setLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    fetch(`${API_BASE}/api/session/${sessionId}/report-data`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`Server responded ${res.status}`);
+        return res.json();
+      })
+      .then((json) => {
+        if (!cancelled) {
+          setData(json);
+          setLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(err.message || "Failed to load report data.");
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, demo]);
+
+  const handlePrint = React.useCallback(() => {
+    window.print();
+  }, []);
+
+  // Close on backdrop click.
+  const handleBackdropClick = React.useCallback(
+    (e) => {
+      if (e.target === e.currentTarget) onClose();
+    },
+    [onClose],
+  );
+
+  // Close on Escape key.
+  React.useEffect(() => {
+    const handler = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  const s = data?.session ?? {};
+  const m = data?.measurements ?? {};
+  const ml = data?.ml ?? {};
+  const sq = data?.signal_quality ?? {};
+  const dist = ml?.class_distribution ?? {};
+
+  return (
+    <div
+      className="report-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Patient Report Preview"
+      onClick={handleBackdropClick}
+    >
+      <div className="report-modal">
+        {/* Modal header */}
+        <div className="report-modal-header">
+          <div className="report-modal-title-group">
+            <div className="report-modal-eyebrow">DOCTOR DASHBOARD</div>
+            <h2 className="report-modal-title">Patient ECG Report</h2>
+          </div>
+          <div className="report-modal-actions">
+            {!loading && !error && (
+              <button
+                id="report-download-pdf-btn"
+                className="btn-report-print"
+                onClick={handlePrint}
+                title={demo ? "Download PDF (demo — not real patient data)" : "Download as PDF (print dialog)"}
+              >
+                {demo ? "⬇ Download PDF (DEMO)" : "⬇ Download PDF"}
+              </button>
+            )}
+            <button
+              id="report-close-btn"
+              className="btn-report-close"
+              onClick={onClose}
+              title="Close report"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+
+        {/* Modal body */}
+        <div className="report-modal-body">
+          {loading && (
+            <div className="report-loading">
+              <div className="report-loading-spinner" />
+              <span>Loading report data…</span>
+            </div>
+          )}
+
+          {error && (
+            <div className="report-error">
+              <div className="report-error-icon">!</div>
+              <div>
+                <strong>Unable to load report</strong>
+                <span>{error}</span>
+              </div>
+            </div>
+          )}
+
+          {!loading && !error && data && (
+            <div id="report-printable-area">
+              {/* Demo watermark — visible on screen AND in print; only rendered in demo mode */}
+              {demo && (
+                <div className="report-demo-banner" aria-live="assertive">
+                  ⚠&nbsp;&nbsp;DEMO — NOT REAL PATIENT DATA&nbsp;&nbsp;⚠
+                </div>
+              )}
+              {/* Print-only header */}
+              <div className="report-print-header">
+                <div className="report-print-logo">♥ ECG Clinical Monitor</div>
+                <div className="report-print-subtitle">
+                  Patient ECG Session Report
+                </div>
+                <div className="report-print-meta">
+                  Generated: {formatIso(data.generated_at)}
+                </div>
+              </div>
+
+              {/* Section: Session Information */}
+              <div className="report-section">
+                <div className="report-section-title">Session Information</div>
+                <div className="report-info-grid">
+                  <div className="report-info-item">
+                    <span>Session ID</span>
+                    <strong className="session-id">
+                      {na(s.session_id)}
+                    </strong>
+                  </div>
+                  <div className="report-info-item">
+                    <span>Device</span>
+                    <strong>{na(s.device_id)}</strong>
+                  </div>
+                  <div className="report-info-item">
+                    <span>Lead</span>
+                    <strong>{na(s.lead)}</strong>
+                  </div>
+                  <div className="report-info-item">
+                    <span>Status</span>
+                    <strong
+                      className={
+                        s.status === "active"
+                          ? "report-status-active"
+                          : "report-status-done"
+                      }
+                    >
+                      {na(s.status)}
+                    </strong>
+                  </div>
+                  <div className="report-info-item">
+                    <span>Started</span>
+                    <strong>{formatIso(s.started_at)}</strong>
+                  </div>
+                  <div className="report-info-item">
+                    <span>Ended</span>
+                    <strong>{formatIso(s.ended_at)}</strong>
+                  </div>
+                  <div className="report-info-item">
+                    <span>Sampling Rate</span>
+                    <strong>{na(s.sampling_rate, " Hz")}</strong>
+                  </div>
+                  <div className="report-info-item">
+                    <span>Samples Received</span>
+                    <strong>
+                      {s.samples_received != null
+                        ? s.samples_received.toLocaleString()
+                        : "Not available"}
+                    </strong>
+                  </div>
+                </div>
+              </div>
+
+              {/* Section: Key ECG Metrics */}
+              <div className="report-section">
+                <div className="report-section-title">Key ECG Metrics</div>
+                <div className="report-metrics-row">
+                  <div className="report-metric-card report-metric-accent">
+                    <div className="report-metric-label">Avg Heart Rate</div>
+                    <div className="report-metric-value">
+                      {m.avg_heart_rate_bpm != null
+                        ? m.avg_heart_rate_bpm
+                        : "—"}
+                      <span>BPM</span>
+                    </div>
+                    <div className="report-metric-sub">
+                      Min {na(m.min_heart_rate_bpm, " bpm")} · Max{" "}
+                      {na(m.max_heart_rate_bpm, " bpm")}
+                    </div>
+                  </div>
+                  <div className="report-metric-card">
+                    <div className="report-metric-label">Latest Heart Rate</div>
+                    <div className="report-metric-value">
+                      {m.latest_heart_rate_bpm != null
+                        ? m.latest_heart_rate_bpm
+                        : "—"}
+                      <span>BPM</span>
+                    </div>
+                    <div className="report-metric-sub">
+                      At {formatIso(m.latest_recorded_at)}
+                    </div>
+                  </div>
+                  <div className="report-metric-card">
+                    <div className="report-metric-label">Avg RR Interval</div>
+                    <div className="report-metric-value">
+                      {m.avg_rr_interval_ms != null
+                        ? m.avg_rr_interval_ms
+                        : "—"}
+                      <span>MS</span>
+                    </div>
+                    <div className="report-metric-sub">
+                      Latest {na(m.latest_rr_interval_ms, " ms")}
+                    </div>
+                  </div>
+                  <div className="report-metric-card">
+                    <div className="report-metric-label">Measurements</div>
+                    <div className="report-metric-value">
+                      {m.count != null ? m.count.toLocaleString() : "—"}
+                    </div>
+                    <div className="report-metric-sub">Total readings</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Section: ML Beat Classification */}
+              <div className="report-section">
+                <div className="report-section-title">
+                  AI Beat Classification (SmartECG-HD)
+                </div>
+
+                {ml.total_predictions === 0 ? (
+                  <div className="report-empty-note">
+                    No ML predictions available for this session.
+                  </div>
+                ) : (
+                  <>
+                    <div className="report-ml-summary">
+                      <div>
+                        <span>Total beats classified</span>
+                        <strong>
+                          {ml.total_predictions?.toLocaleString() ??
+                            "Not available"}
+                        </strong>
+                      </div>
+                      <div>
+                        <span>Avg confidence</span>
+                        <strong>{na(ml.avg_confidence_pct, "%")}</strong>
+                      </div>
+                      <div>
+                        <span>Last result</span>
+                        <strong>
+                          {ml.last_predicted_class
+                            ? `${ML_CLASS_LABELS[ml.last_predicted_class] ?? ml.last_predicted_class} (${na(ml.last_confidence_pct, "%")})`
+                            : "Not available"}
+                        </strong>
+                      </div>
+                      <div>
+                        <span>Model</span>
+                        <strong>{na(ml.model_name)}</strong>
+                      </div>
+                    </div>
+
+                    <div className="report-beat-dist">
+                      {Object.entries(dist).map(([cls, info]) => (
+                        <div key={cls} className="report-beat-row">
+                          <div
+                            className={`report-beat-code report-code-${cls}`}
+                          >
+                            {cls}
+                          </div>
+                          <div className="report-beat-info">
+                            <div className="report-beat-label">
+                              {ML_CLASS_LABELS[cls] ?? cls}
+                            </div>
+                            <div className="report-beat-bar-track">
+                              <div
+                                className={`report-beat-bar report-bar-${cls}`}
+                                style={{ width: `${info.percent}%` }}
+                              />
+                            </div>
+                          </div>
+                          <div className="report-beat-stats">
+                            <strong>{info.count}</strong>
+                            <span>{info.percent}%</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* Section: Signal Quality */}
+              <div className="report-section">
+                <div className="report-section-title">Signal Quality</div>
+                <div className="report-info-grid">
+                  <div className="report-info-item">
+                    <span>Quality Score</span>
+                    <strong>
+                      {sq.score != null ? `${sq.score} / 100` : "Not available"}
+                    </strong>
+                  </div>
+                  <div className="report-info-item">
+                    <span>Quality Label</span>
+                    <strong>{na(sq.label)}</strong>
+                  </div>
+                  <div className="report-info-item">
+                    <span>Baseline Wander</span>
+                    <strong>{na(sq.baseline_wander)}</strong>
+                  </div>
+                  <div className="report-info-item">
+                    <span>Noise RMS</span>
+                    <strong>{na(sq.noise_rms)}</strong>
+                  </div>
+                  <div className="report-info-item">
+                    <span>Peaks Detected</span>
+                    <strong>
+                      {sq.peak_count != null
+                        ? sq.peak_count.toLocaleString()
+                        : "Not available"}
+                    </strong>
+                  </div>
+                  <div className="report-info-item">
+                    <span>Recorded At</span>
+                    <strong>{formatIso(sq.recorded_at)}</strong>
+                  </div>
+                </div>
+              </div>
+
+              {/* Disclaimer */}
+              <div className="report-disclaimer">
+                <strong>Clinical Decision Support: </strong>This report is
+                generated from automated ECG monitoring and AI-assisted beat
+                classification. It is intended to support clinical review and is
+                not a standalone medical diagnosis. Results should be
+                interpreted by a qualified healthcare professional.
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /* Main                                                                       */
 /* -------------------------------------------------------------------------- */
 
@@ -530,7 +992,10 @@ export default function App() {
 
   const recordingStartRef = useRef(null);
 
-  
+  // Report modal visibility.
+  const [showReport, setShowReport] = useState(false);
+  // Demo-only preview — never tied to a real session or backend call.
+  const [showDemoReport, setShowDemoReport] = useState(false);
 
   /* ---------------------------------------------------------------------- */
   /* WebSocket                                                              */
@@ -1193,6 +1658,39 @@ const analysisStatus = metric(
               </strong>
             </div>
           </div>
+
+          {/* NEW: Generate Patient Report button — only addition to this panel */}
+          <div className="report-btn-row">
+            <button
+              id="generate-patient-report-btn"
+              className="btn-generate-report"
+              onClick={() => setShowReport(true)}
+              disabled={!sessionId}
+              title={
+                sessionId
+                  ? "Preview and download patient report"
+                  : "Waiting for session…"
+              }
+            >
+              <span className="btn-report-icon">📋</span>
+              Generate Patient Report
+            </button>
+            {!sessionId && (
+              <span className="report-btn-hint">
+                Available once a session is active
+              </span>
+            )}
+            {/* Demo preview button — always enabled, never touches the backend */}
+            <button
+              id="preview-demo-report-btn"
+              className="btn-preview-demo"
+              onClick={() => setShowDemoReport(true)}
+              title="Open a demo preview of the report layout (no real patient data)"
+            >
+              <span className="btn-report-icon">🧪</span>
+              Preview Demo
+            </button>
+          </div>
         </section>
 
         {/* Disclaimer */}
@@ -1209,6 +1707,24 @@ const analysisStatus = metric(
         Live ECG monitoring · AI-assisted insights · Designed for clinical
         review
       </footer>
+
+      {/* NEW: Patient Report Modal — position:fixed, so DOM placement inside
+          dashboard does not affect layout or existing elements */}
+      {showReport && (
+        <PatientReportModal
+          sessionId={sessionId}
+          onClose={() => setShowReport(false)}
+        />
+      )}
+
+      {/* Demo-only modal — demo=true skips fetch; DEMO_DATA never leaves the browser */}
+      {showDemoReport && (
+        <PatientReportModal
+          demo
+          sessionId={null}
+          onClose={() => setShowDemoReport(false)}
+        />
+      )}
     </div>
   );
 }
