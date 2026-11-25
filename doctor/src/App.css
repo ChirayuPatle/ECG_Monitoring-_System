@@ -918,3 +918,668 @@ footer {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ==========================================================================
+   Generate Patient Report — new classes only, no existing selectors touched
+   ========================================================================== */
+
+/* Button row below the recording-grid */
+.report-btn-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.btn-generate-report {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border: 1.5px solid var(--green-600);
+  border-radius: 12px;
+  background: linear-gradient(135deg, #edfff4, #dffaec);
+  color: var(--green-800);
+  font-size: 13px;
+  font-weight: 660;
+  cursor: pointer;
+  transition: background 160ms ease, box-shadow 160ms ease, transform 120ms ease;
+  white-space: nowrap;
+}
+
+.btn-generate-report:hover:not(:disabled) {
+  background: linear-gradient(135deg, #d8f7e8, #c6f0da);
+  box-shadow: 0 4px 14px rgba(29, 125, 91, 0.15);
+  transform: translateY(-1px);
+}
+
+.btn-generate-report:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.btn-generate-report:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+  border-color: var(--border-strong);
+  background: var(--surface-soft);
+  color: var(--text-muted);
+}
+
+.btn-report-icon {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.report-btn-hint {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+/* Demo preview button — always enabled; amber palette clearly distinct from the
+   production green "Generate Patient Report" button */
+.btn-preview-demo {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 16px;
+  border: 1.5px solid #b45309;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #fffbeb, #fef3c7);
+  color: #92400e;
+  font-size: 12px;
+  font-weight: 660;
+  cursor: pointer;
+  transition: background 160ms ease, box-shadow 160ms ease, transform 120ms ease;
+  white-space: nowrap;
+}
+
+.btn-preview-demo:hover {
+  background: linear-gradient(135deg, #fef3c7, #fde68a);
+  box-shadow: 0 4px 14px rgba(180, 83, 9, 0.18);
+  transform: translateY(-1px);
+}
+
+.btn-preview-demo:active {
+  transform: translateY(0);
+}
+
+/* Demo banner — renders inside report-printable-area; shown on screen AND in print.
+   Deliberately high-contrast amber so it cannot be mistaken for real data.
+   The isolated @media print block has been removed; the print rules now live
+   inside the single authoritative @media print block below for correct cascade. */
+.report-demo-banner {
+  box-sizing: border-box;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 14px 24px;
+  margin-bottom: 20px;
+  border: 2px solid #b45309;
+  border-radius: 6px;
+  background: #fef3c7;
+  color: #78350f;
+  font-size: 13px;
+  font-weight: 780;
+  letter-spacing: 0.05em;
+  text-align: center;
+  white-space: nowrap;
+}
+
+/* Modal backdrop */
+.report-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 32px 16px;
+  background: rgba(14, 50, 34, 0.42);
+  backdrop-filter: blur(6px);
+  overflow-y: auto;
+}
+
+/* Modal container */
+.report-modal {
+  width: 100%;
+  max-width: 780px;
+  border: 1px solid var(--border-strong);
+  border-radius: 22px;
+  background: #fff;
+  box-shadow: 0 28px 72px rgba(14, 50, 34, 0.22);
+  overflow: hidden;
+}
+
+/* Modal header */
+.report-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 26px 18px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(135deg, #f5fdf8, #edfbf2);
+}
+
+.report-modal-eyebrow {
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.1em;
+}
+
+.report-modal-title {
+  margin: 5px 0 0;
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.report-modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.btn-report-print {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 16px;
+  border: 1.5px solid var(--green-600);
+  border-radius: 10px;
+  background: var(--green-700);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background 140ms ease, box-shadow 140ms ease;
+}
+
+.btn-report-print:hover {
+  background: var(--green-800);
+  box-shadow: 0 4px 12px rgba(29, 125, 91, 0.22);
+}
+
+.btn-report-close {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  background: #fff;
+  color: var(--text-soft);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+
+.btn-report-close:hover {
+  background: var(--page-bg-strong);
+  color: var(--text);
+}
+
+/* Modal body */
+.report-modal-body {
+  padding: 24px 26px 28px;
+  max-height: calc(100vh - 160px);
+  overflow-y: auto;
+}
+
+/* Loading state */
+.report-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 48px 0;
+  color: var(--text-soft);
+  font-size: 13px;
+}
+
+.report-loading-spinner {
+  width: 22px;
+  height: 22px;
+  border: 2.5px solid var(--border-strong);
+  border-top-color: var(--green-600);
+  border-radius: 50%;
+  animation: report-spin 0.8s linear infinite;
+}
+
+@keyframes report-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Error state */
+.report-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 20px;
+  border: 1px solid #f0d8d5;
+  border-radius: 14px;
+  background: #fff8f7;
+}
+
+.report-error-icon {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #fde8e5;
+  color: var(--danger);
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.report-error strong {
+  display: block;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 660;
+}
+
+.report-error span {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-soft);
+  font-size: 11px;
+}
+
+/* Report sections */
+.report-section {
+  margin-bottom: 22px;
+  padding-bottom: 22px;
+  border-bottom: 1px solid var(--border);
+}
+
+.report-section:last-of-type {
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.report-section-title {
+  margin-bottom: 13px;
+  color: var(--green-800);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+/* Info grid (session info, signal quality) */
+.report-info-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.report-info-item {
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--panel-soft);
+}
+
+.report-info-item span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.report-info-item strong {
+  display: block;
+  margin-top: 5px;
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.report-status-active { color: var(--green-700) !important; }
+.report-status-done   { color: var(--text-muted) !important; }
+
+/* Metrics row */
+.report-metrics-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.report-metric-card {
+  padding: 15px 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-strong);
+}
+
+.report-metric-accent {
+  border-color: var(--border-strong);
+  background: linear-gradient(145deg, #fff, #f2fdf6);
+}
+
+.report-metric-label {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.report-metric-value {
+  margin-top: 8px;
+  color: var(--text);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+
+.report-metric-accent .report-metric-value { color: var(--green-700); }
+
+.report-metric-value span {
+  margin-left: 4px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.report-metric-sub {
+  margin-top: 5px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+/* ML summary row */
+.report-ml-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.report-ml-summary > div {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--panel-soft);
+}
+
+.report-ml-summary span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.report-ml-summary strong {
+  display: block;
+  margin-top: 5px;
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* Beat distribution */
+.report-beat-dist {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.report-beat-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.report-beat-code {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: #eafaf0;
+  color: var(--green-700);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.report-code-S,
+.report-code-V,
+.report-code-F { background: #fff5e7; color: var(--warning); }
+
+.report-code-Q { background: #edf2ef; color: #718178; }
+
+.report-beat-info { flex: 1; min-width: 0; }
+
+.report-beat-label {
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 5px;
+}
+
+.report-beat-bar-track {
+  height: 6px;
+  border-radius: 99px;
+  background: var(--page-bg-strong);
+  overflow: hidden;
+}
+
+.report-beat-bar {
+  height: 100%;
+  border-radius: 99px;
+  background: var(--green-500);
+  transition: width 400ms ease;
+}
+
+.report-bar-S,
+.report-bar-V,
+.report-bar-F { background: var(--warning); }
+
+.report-bar-Q { background: #9db0a5; }
+
+.report-beat-stats {
+  text-align: right;
+  flex-shrink: 0;
+  min-width: 52px;
+}
+
+.report-beat-stats strong {
+  display: block;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.report-beat-stats span {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+/* Empty note */
+.report-empty-note {
+  padding: 16px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 11px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* Print-only header (hidden on screen) */
+.report-print-header { display: none; }
+
+/* Disclaimer inside report */
+.report-disclaimer {
+  margin-top: 18px;
+  padding: 13px 15px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--page-bg-strong);
+  color: var(--text-soft);
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+
+.report-disclaimer strong { color: var(--text); }
+
+/* ---------------------------------------------------------------------- */
+/* Print layout — only report content is printed, dashboard is hidden     */
+/* ---------------------------------------------------------------------- */
+
+@media print {
+  /*
+   * Hide everything on the page by default.
+   * Then make the report modal visible regardless of whether .report-backdrop
+   * is a direct child of <body> or nested one level deep inside #root
+   * (which is the case in this React SPA).
+   *
+   * Strategy:
+   *   1. Hide all direct <body> children.
+   *   2. Restore any direct-child .report-backdrop (future-proof).
+   *   3. For the React SPA: keep #root visible but hide its children,
+   *      then restore the nested .report-backdrop.
+   */
+  body > *                    { display: none !important; }
+  body > .report-backdrop     { display: block !important; }
+
+  /* React SPA: #root is the body child — keep it in layout but invisible,
+     then show only the modal inside it. */
+  body > #root                { display: block !important; visibility: hidden; }
+  body > #root > *            { display: none !important; }
+  body > #root > .report-backdrop {
+    display: block !important;
+    visibility: visible !important;
+  }
+
+  .report-backdrop {
+    display: block !important;
+    position: static !important;
+    padding: 0 !important;
+    background: none !important;
+    backdrop-filter: none !important;
+    overflow: visible !important;
+  }
+
+  .report-modal {
+    width: 100% !important;
+    max-width: 100% !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    overflow: visible !important;
+  }
+
+  .report-modal-header {
+    border-bottom: 1px solid #ccc;
+    background: none !important;
+  }
+
+  .report-modal-actions { display: none !important; }
+
+  .report-modal-body {
+    max-height: none !important;
+    overflow: visible !important;
+    padding: 20px 26px !important;
+  }
+
+  .report-print-header {
+    display: block;
+    margin-bottom: 20px;
+    padding-bottom: 14px;
+    border-bottom: 2px solid #183d2d;
+  }
+
+  .report-print-logo {
+    color: #183d2d;
+    font-size: 18px;
+    font-weight: 700;
+  }
+
+  .report-print-subtitle {
+    margin-top: 3px;
+    color: #5d7c6d;
+    font-size: 13px;
+  }
+
+  .report-print-meta {
+    margin-top: 2px;
+    color: #7a8d84;
+    font-size: 10px;
+  }
+
+  .report-section,
+  .report-disclaimer { break-inside: avoid; }
+
+  .report-metrics-row,
+  .report-info-grid,
+  .report-ml-summary { display: grid !important; }
+
+  .report-info-item,
+  .report-metric-card,
+  .report-ml-summary > div {
+    background: none !important;
+    border: 1px solid #ddd !important;
+  }
+
+  .report-beat-bar {
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  /* Demo banner — explicit, full rule inside the authoritative print block.
+     break-inside:avoid prevents the banner being split across pages.
+     display:block is more reliable than flex across PDF renderers.
+     Full border shorthand (not border-color) ensures the border always renders.
+     white-space:nowrap + generous padding prevents text clipping at margins. */
+  .report-demo-banner {
+    display: block !important;
+    box-sizing: border-box !important;
+    width: 100% !important;
+    padding: 14px 28px !important;
+    margin: 0 0 20px !important;
+    border: 2.5px solid #b45309 !important;
+    border-radius: 4px !important;
+    background: #fef3c7 !important;
+    color: #78350f !important;
+    font-size: 13pt !important;
+    font-weight: bold !important;
+    letter-spacing: 0.05em !important;
+    text-align: center !important;
+    white-space: nowrap !important;
+    break-inside: avoid !important;
+    break-before: avoid !important;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  @page { margin: 18mm 14mm; size: A4 portrait; }
+}
+
+@media (max-width: 700px) {
+  .report-metrics-row,
+  .report-ml-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 480px) {
+  .report-metrics-row,
+  .report-ml-summary { grid-template-columns: 1fr; }
+}

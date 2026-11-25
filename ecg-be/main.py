@@ -3206,6 +3206,211 @@ def get_ml_dataset(
 
 
 # ============================================================
+# PATIENT REPORT DATA
+#
+# Read-only aggregation endpoint for the Doctor Dashboard
+# "Generate Patient Report" feature.
+#
+# Queries existing tables only — no schema changes.
+# ============================================================
+
+@app.get(
+    "/api/session/{session_id}/report-data"
+)
+def get_report_data(
+    session_id: str,
+):
+
+    db = SessionLocal()
+
+    try:
+
+        # --------------------------------------------------------
+        # Session info.
+        # --------------------------------------------------------
+
+        session = get_session_by_public_id(
+            db,
+            session_id,
+        )
+
+        if not session:
+
+            raise HTTPException(
+                status_code=404,
+                detail="Session not found.",
+            )
+
+        session_info = {
+            "session_id": session.session_id,
+            "device_id": session.device_id,
+            "started_at": (
+                session.started_at.isoformat()
+                if session.started_at
+                else None
+            ),
+            "ended_at": (
+                session.ended_at.isoformat()
+                if session.ended_at
+                else None
+            ),
+            "last_packet_at": (
+                session.last_packet_at.isoformat()
+                if session.last_packet_at
+                else None
+            ),
+            "sampling_rate": session.sampling_rate,
+            "samples_received": session.samples_received,
+            "packets_received": session.packets_received,
+            "status": session.status,
+            "lead": session.lead,
+        }
+
+        # --------------------------------------------------------
+        # Latest measurement (most recent row for this session).
+        # --------------------------------------------------------
+
+        latest_measurement = (
+            db.query(ECGMeasurement)
+            .filter(ECGMeasurement.session_id == session_id)
+            .order_by(desc(ECGMeasurement.recorded_at))
+            .first()
+        )
+
+        # Summary stats: avg HR and RR over all measurements.
+        from sqlalchemy import func as sa_func
+
+        measurement_stats = (
+            db.query(
+                sa_func.avg(ECGMeasurement.hr).label("avg_hr"),
+                sa_func.min(ECGMeasurement.hr).label("min_hr"),
+                sa_func.max(ECGMeasurement.hr).label("max_hr"),
+                sa_func.avg(ECGMeasurement.rr).label("avg_rr"),
+                sa_func.count(ECGMeasurement.id).label("count"),
+            )
+            .filter(ECGMeasurement.session_id == session_id)
+            .first()
+        )
+
+        def _round(v, d=1):
+            return round(float(v), d) if v is not None else None
+
+        measurements_summary = {
+            "count": int(measurement_stats.count or 0),
+            "avg_heart_rate_bpm": _round(measurement_stats.avg_hr),
+            "min_heart_rate_bpm": _round(measurement_stats.min_hr),
+            "max_heart_rate_bpm": _round(measurement_stats.max_hr),
+            "avg_rr_interval_ms": _round(measurement_stats.avg_rr),
+            "latest_heart_rate_bpm": _round(
+                latest_measurement.hr if latest_measurement else None
+            ),
+            "latest_rr_interval_ms": _round(
+                latest_measurement.rr if latest_measurement else None
+            ),
+            "latest_recorded_at": (
+                latest_measurement.recorded_at.isoformat()
+                if latest_measurement and latest_measurement.recorded_at
+                else None
+            ),
+        }
+
+        # --------------------------------------------------------
+        # ML prediction summary — beat class distribution.
+        # --------------------------------------------------------
+
+        ml_predictions = (
+            db.query(ECGMLPrediction)
+            .filter(ECGMLPrediction.session_id == session_id)
+            .all()
+        )
+
+        class_counts = {"N": 0, "S": 0, "V": 0, "F": 0, "Q": 0}
+        total_predictions = len(ml_predictions)
+        confidence_sum = 0.0
+        confidence_count = 0
+        last_prediction = None
+
+        for pred in ml_predictions:
+            cls = str(pred.predicted_class).upper()
+            if cls in class_counts:
+                class_counts[cls] += 1
+            if pred.confidence is not None:
+                confidence_sum += float(pred.confidence)
+                confidence_count += 1
+            last_prediction = pred
+
+        avg_confidence = (
+            round(confidence_sum / confidence_count, 1)
+            if confidence_count > 0
+            else None
+        )
+
+        class_distribution = {}
+        for cls, cnt in class_counts.items():
+            pct = round(cnt / total_predictions * 100, 1) if total_predictions > 0 else 0.0
+            class_distribution[cls] = {"count": cnt, "percent": pct}
+
+        ml_summary = {
+            "total_predictions": total_predictions,
+            "avg_confidence_pct": avg_confidence,
+            "class_distribution": class_distribution,
+            "last_predicted_class": (
+                last_prediction.predicted_class if last_prediction else None
+            ),
+            "last_confidence_pct": (
+                round(float(last_prediction.confidence), 1)
+                if last_prediction and last_prediction.confidence is not None
+                else None
+            ),
+            "model_name": (
+                last_prediction.model_name if last_prediction else "SmartECG-HD"
+            ),
+        }
+
+        # --------------------------------------------------------
+        # Latest signal quality.
+        # --------------------------------------------------------
+
+        latest_quality = (
+            db.query(ECGSignalQuality)
+            .filter(ECGSignalQuality.session_id == session_id)
+            .order_by(desc(ECGSignalQuality.recorded_at))
+            .first()
+        )
+
+        signal_quality = {
+            "score": _round(latest_quality.score) if latest_quality else None,
+            "label": latest_quality.label if latest_quality else None,
+            "baseline_wander": (
+                _round(latest_quality.baseline_wander, 3) if latest_quality else None
+            ),
+            "noise_rms": (
+                _round(latest_quality.noise_rms, 3) if latest_quality else None
+            ),
+            "peak_count": (
+                latest_quality.peak_count if latest_quality else None
+            ),
+            "recorded_at": (
+                latest_quality.recorded_at.isoformat()
+                if latest_quality and latest_quality.recorded_at
+                else None
+            ),
+        }
+
+        return {
+            "session": session_info,
+            "measurements": measurements_summary,
+            "ml": ml_summary,
+            "signal_quality": signal_quality,
+            "generated_at": utc_now().isoformat(),
+        }
+
+    finally:
+
+        db.close()
+
+
+# ============================================================
 # WEBSOCKET
 # ============================================================
 
@@ -3234,6 +3439,7 @@ async def websocket_ecg(
                     "type": "connection",
 
                     "status": "connected",
+                    "session_id": active_sessions.get(DEVICE_DEFAULT),
 
                     "sampling_rate": (
                         DEFAULT_SAMPLING_RATE
