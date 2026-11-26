@@ -1,0 +1,546 @@
+/* --------------------------------------------------------------------------
+   ECG Patient Report UI — add-on stylesheet
+   Imported after the existing App.css so the live dashboard styling remains.
+   -------------------------------------------------------------------------- */
+
+.report-btn-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 22px;
+    padding-top: 18px;
+    border-top: 1px solid #e8eee9;
+}
+
+.btn-generate-report,
+.btn-report-print,
+.btn-report-close {
+    border: 0;
+    border-radius: 10px;
+    font: inherit;
+    font-weight: 650;
+    cursor: pointer;
+    transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.btn-generate-report {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 9px;
+    min-height: 44px;
+    padding: 0 18px;
+    color: #fff;
+    background: #18794e;
+    box-shadow: 0 5px 14px rgba(24, 121, 78, 0.15);
+}
+
+.btn-generate-report:hover:not(:disabled),
+.btn-report-print:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 8px 18px rgba(24, 121, 78, 0.18);
+}
+
+.btn-generate-report:disabled {
+    opacity: 0.48;
+    cursor: not-allowed;
+    box-shadow: none;
+}
+
+.btn-report-icon {
+    font-size: 18px;
+    line-height: 1;
+}
+
+.report-btn-hint {
+    color: #718078;
+    font-size: 12px;
+}
+
+.report-backdrop {
+    position: fixed;
+    z-index: 9999;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 22px;
+    background: rgba(15, 28, 22, 0.58);
+    backdrop-filter: blur(5px);
+}
+
+.report-modal {
+    display: flex;
+    flex-direction: column;
+    width: min(980px, 100%);
+    max-height: min(92vh, 980px);
+    overflow: hidden;
+    border: 1px solid #e1eae4;
+    border-radius: 18px;
+    background: #fff;
+    box-shadow: 0 24px 80px rgba(12, 35, 23, 0.24);
+}
+
+.report-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    padding: 20px 24px;
+    border-bottom: 1px solid #e8eee9;
+    background: #fbfdfb;
+}
+
+.report-modal-eyebrow {
+    margin-bottom: 5px;
+    color: #27815c;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+}
+
+.report-modal-title {
+    margin: 0;
+    color: #183328;
+    font-size: 22px;
+    line-height: 1.25;
+}
+
+.report-modal-session {
+    margin: 5px 0 0;
+    color: #78877e;
+    font-size: 11px;
+    overflow-wrap: anywhere;
+}
+
+.report-modal-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.btn-report-print {
+    min-height: 40px;
+    padding: 0 15px;
+    color: #fff;
+    background: #18794e;
+    font-size: 13px;
+}
+
+.btn-report-close {
+    width: 38px;
+    height: 38px;
+    color: #496257;
+    background: #edf3ef;
+    font-size: 24px;
+    line-height: 1;
+}
+
+.report-modal-body {
+    overflow: auto;
+    padding: 24px;
+}
+
+.report-state {
+    display: flex;
+    min-height: 230px;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    color: #587064;
+    text-align: center;
+}
+
+.report-state strong {
+    color: #203c2f;
+    font-size: 16px;
+}
+
+.report-state span {
+    max-width: 520px;
+    font-size: 13px;
+}
+
+.report-state-error strong {
+    color: #a23e35;
+}
+
+.report-state-help {
+    color: #77857e;
+}
+
+.report-spinner {
+    width: 28px;
+    height: 28px;
+    border: 3px solid #dcebe2;
+    border-top-color: #27815c;
+    border-radius: 50%;
+    animation: report-spin 0.8s linear infinite;
+}
+
+@keyframes report-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+#report-printable-area {
+    max-width: 100%;
+    color: #26382f;
+}
+
+.report-print-header {
+    padding: 4px 0 18px;
+    border-bottom: 2px solid #23845c;
+}
+
+.report-print-logo {
+    color: #176c49;
+    font-size: 21px;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+}
+
+.report-print-subtitle {
+    margin-top: 5px;
+    color: #304a3d;
+    font-size: 16px;
+    font-weight: 700;
+}
+
+.report-print-meta {
+    margin-top: 8px;
+    color: #78877e;
+    font-size: 11px;
+}
+
+.report-source-note {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border-radius: 7px;
+    color: #496b59;
+    background: #f0f7f2;
+    font-size: 11px;
+}
+
+.report-section {
+    margin-top: 22px;
+    break-inside: avoid;
+}
+
+.report-section-title {
+    margin: 0 0 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #e1eae4;
+    color: #1c6547;
+    font-size: 14px;
+    font-weight: 800;
+}
+
+.report-info-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.report-info-item {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 5px;
+    padding: 11px 12px;
+    border: 1px solid #e8eee9;
+    border-radius: 9px;
+    background: #fcfdfc;
+}
+
+.report-info-item span,
+.report-ml-summary span {
+    color: #7a8980;
+    font-size: 10px;
+    font-weight: 650;
+    text-transform: uppercase;
+    letter-spacing: 0.045em;
+}
+
+.report-info-item strong {
+    color: #2b4035;
+    font-size: 12px;
+    font-weight: 700;
+    overflow-wrap: anywhere;
+}
+
+.report-identity-note {
+    margin: 9px 0 0;
+    color: #829087;
+    font-size: 10px;
+}
+
+.report-metrics-row {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.report-metric-card {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 7px;
+    padding: 14px;
+    border: 1px solid #e5ede7;
+    border-radius: 11px;
+    background: #fbfdfb;
+}
+
+.report-metric-accent {
+    border-color: #c8e3d2;
+    background: #f2faf5;
+}
+
+.report-metric-label {
+    color: #75847b;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.report-metric-value {
+    color: #1c4c36;
+    font-size: 24px;
+    line-height: 1.1;
+    font-weight: 800;
+    overflow-wrap: anywhere;
+}
+
+.report-metric-value small {
+    color: #7b8a80;
+    font-size: 10px;
+}
+
+.report-metric-sub {
+    color: #829087;
+    font-size: 10px;
+    line-height: 1.45;
+}
+
+.report-ml-summary {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 14px;
+}
+
+.report-ml-summary>div {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 11px;
+    border-radius: 9px;
+    background: #f5f8f6;
+}
+
+.report-ml-summary strong {
+    color: #2b4035;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+}
+
+.report-beat-dist {
+    display: grid;
+    gap: 10px;
+}
+
+.report-beat-row {
+    display: grid;
+    grid-template-columns: 30px minmax(0, 1fr) 72px;
+    align-items: center;
+    gap: 10px;
+}
+
+.report-beat-code {
+    display: grid;
+    width: 28px;
+    height: 28px;
+    place-items: center;
+    border-radius: 7px;
+    color: #24513b;
+    background: #eaf4ed;
+    font-size: 12px;
+    font-weight: 800;
+}
+
+.report-beat-info {
+    min-width: 0;
+}
+
+.report-beat-label {
+    margin-bottom: 5px;
+    color: #51645a;
+    font-size: 11px;
+}
+
+.report-beat-bar-track {
+    height: 7px;
+    overflow: hidden;
+    border-radius: 99px;
+    background: #edf1ee;
+}
+
+.report-beat-bar {
+    height: 100%;
+    border-radius: inherit;
+    background: #5aa27c;
+}
+
+.report-beat-stats {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+    color: #718078;
+    font-size: 10px;
+}
+
+.report-beat-stats strong {
+    color: #2e4538;
+    font-size: 12px;
+}
+
+.report-empty-note {
+    padding: 15px;
+    border: 1px dashed #d7e4db;
+    border-radius: 9px;
+    color: #718078;
+    background: #fbfdfb;
+    font-size: 12px;
+}
+
+.report-disclaimer {
+    margin-top: 24px;
+    padding: 13px 15px;
+    border-left: 3px solid #79a88a;
+    border-radius: 0 8px 8px 0;
+    color: #617268;
+    background: #f3f7f4;
+    font-size: 10px;
+    line-height: 1.6;
+}
+
+.report-disclaimer strong {
+    color: #365846;
+}
+
+@media (max-width: 700px) {
+    .report-backdrop {
+        padding: 8px;
+    }
+
+    .report-modal {
+        max-height: 96vh;
+        border-radius: 13px;
+    }
+
+    .report-modal-header {
+        align-items: flex-start;
+        padding: 15px;
+    }
+
+    .report-modal-title {
+        font-size: 18px;
+    }
+
+    .report-modal-actions {
+        gap: 6px;
+    }
+
+    .btn-report-print {
+        padding: 0 10px;
+        font-size: 11px;
+    }
+
+    .report-modal-body {
+        padding: 15px;
+    }
+
+    .report-info-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .report-metrics-row,
+    .report-ml-summary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media print {
+    @page {
+        size: A4;
+        margin: 14mm;
+    }
+
+    html,
+    body {
+        background: #fff !important;
+    }
+
+    body * {
+        visibility: hidden !important;
+    }
+
+    #report-printable-area,
+    #report-printable-area * {
+        visibility: visible !important;
+    }
+
+    #report-printable-area {
+        position: absolute !important;
+        inset: 0 auto auto 0 !important;
+        width: 100% !important;
+        max-width: none !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        color: #17251d !important;
+        background: #fff !important;
+    }
+
+    .report-backdrop,
+    .report-modal,
+    .report-modal-body {
+        position: static !important;
+        display: block !important;
+        width: 100% !important;
+        max-width: none !important;
+        max-height: none !important;
+        overflow: visible !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        border: 0 !important;
+        border-radius: 0 !important;
+        background: #fff !important;
+        box-shadow: none !important;
+    }
+
+    .report-modal-header,
+    .report-state {
+        display: none !important;
+    }
+
+    .report-section {
+        break-inside: avoid;
+        page-break-inside: avoid;
+    }
+
+    .report-info-item,
+    .report-metric-card {
+        break-inside: avoid;
+    }
+
+    .report-source-note,
+    .report-disclaimer {
+        print-color-adjust: exact;
+        -webkit-print-color-adjust: exact;
+    }
+}

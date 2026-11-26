@@ -7,21 +7,27 @@ import React, {
 } from "react";
 
 import "./App.css";
+import "./App.report.css";
 
-const API_BASE =
-  import.meta.env.VITE_API_BASE_URL ||
-  "http://10.132.32.10:9000";
+/* =========================================================
+   CONFIGURATION
+   ========================================================= */
 
-const DEVICE_ID =
-  import.meta.env.VITE_ECG_DEVICE_ID ||
-  "ecg_esp8266_01";
+const API_BASE = (
+  import.meta.env.VITE_API_BASE_URL || "http://10.253.72.10:9000"
+).replace(/\/+$/, "");
 
-const WS_URL = API_BASE.startsWith("https://")
-  ? API_BASE.replace(/^https:\/\//, "wss://") + "/ws/ecg"
-  : API_BASE.replace(/^http:\/\//, "ws://") + "/ws/ecg";
+const DEVICE_ID = import.meta.env.VITE_ECG_DEVICE_ID || "ecg_esp8266_01";
+
+const WS_URL = (
+  import.meta.env.VITE_ECG_WS_URL ||
+  API_BASE.replace(/^https:/i, "wss:").replace(/^http:/i, "ws:") + "/ws/ecg"
+).replace(/\/+$/, "");
 
 const DEFAULT_SAMPLE_RATE = 200;
 const DISPLAY_SECONDS = 10;
+const MAX_BUFFER_SECONDS = 30;
+const CLINICAL_ANALYSIS_INTERVAL = 180000;
 
 const ML_CLASS_NAMES = {
   N: "Normal",
@@ -31,9 +37,9 @@ const ML_CLASS_NAMES = {
   Q: "Unclassified",
 };
 
-/* -------------------------------------------------------------------------- */
-/* Helpers                                                                    */
-/* -------------------------------------------------------------------------- */
+/* =========================================================
+   GENERAL HELPERS
+   ========================================================= */
 
 function metric(object, ...keys) {
   if (!object) return null;
@@ -65,168 +71,475 @@ function formatNumber(value, decimals = 0) {
 }
 
 function formatDuration(seconds) {
-  const total = Math.max(
-    0,
-    Math.floor(Number(seconds) || 0)
-  );
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
 
   const hours = Math.floor(total / 3600);
-  const minutes = Math.floor(
-    (total % 3600) / 60
-  );
+  const minutes = Math.floor((total % 3600) / 60);
   const secs = total % 60;
 
   if (hours > 0) {
-    return `${String(hours).padStart(
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(
       2,
-      "0"
-    )}:${String(minutes).padStart(
-      2,
-      "0"
+      "0",
     )}:${String(secs).padStart(2, "0")}`;
   }
 
-  return `${String(minutes).padStart(
-    2,
-    "0"
-  )}:${String(secs).padStart(2, "0")}`;
+  return `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
 }
 
+/* =========================================================
+   SIGNAL QUALITY
+   ========================================================= */
+
 function normalizeQuality(quality) {
-  if (!quality) {
-    return {
-      label: "Waiting",
-      score: null,
-    };
+  if (quality == null || quality === "") {
+    return { label: "Waiting", score: null };
   }
 
   if (typeof quality === "string") {
+    return { label: quality, score: null };
+  }
+
+  if (typeof quality === "number") {
     return {
-      label: quality,
-      score: null,
+      label: "Available",
+      score: Number.isFinite(quality) ? quality : null,
     };
   }
 
-  return {
-    label:
-      metric(
-        quality,
-        "label",
-        "quality"
-      ) || "Waiting",
+  const rawScore = metric(
+    quality,
+    "score",
+    "quality_score",
+    "signal_quality_score",
+    "quality_pct",
+    "percentage",
+  );
 
-    score: metric(
-      quality,
-      "score"
-    ),
+  const rawLabel = metric(
+    quality,
+    "label",
+    "quality",
+    "status",
+    "classification",
+    "signal_quality",
+  );
+
+  return {
+    label: rawLabel ?? "Waiting",
+    score:
+      rawScore !== null && Number.isFinite(Number(rawScore))
+        ? Number(rawScore)
+        : null,
   };
 }
+
+/* =========================================================
+   SMART ECG ML
+   ========================================================= */
 
 function normalizePrediction(prediction) {
   if (!prediction) return null;
 
+  let candidate = prediction;
+
+  if (candidate.ml && typeof candidate.ml === "object") {
+    candidate = candidate.ml;
+  }
+
+  if (Array.isArray(candidate.predictions)) {
+    if (candidate.predictions.length === 0) return null;
+
+    candidate = candidate.predictions[candidate.predictions.length - 1];
+  }
+
+  if (!candidate || typeof candidate !== "object") return null;
+
   const code = metric(
-    prediction,
+    candidate,
     "predicted_class",
     "predictedClass",
     "class",
-    "prediction"
+    "prediction",
   );
 
   if (!code) return null;
 
   const confidence = metric(
-    prediction,
+    candidate,
     "confidence_pct",
     "confidence",
-    "confidence_percent"
+    "confidence_percent",
   );
 
   return {
     code: String(code).toUpperCase(),
 
     confidence:
-      confidence !== null &&
-      Number.isFinite(Number(confidence))
+      confidence !== null && Number.isFinite(Number(confidence))
         ? Number(confidence)
         : null,
 
-    rPeakSample: metric(
-      prediction,
-      "r_peak_sample",
-      "rPeakSample"
-    ),
+    rPeakSample: metric(candidate, "r_peak_sample", "rPeakSample"),
 
-    rPeakTime: metric(
-      prediction,
-      "r_peak_time_seconds",
-      "rPeakTimeSeconds"
-    ),
+    rPeakTime: metric(candidate, "r_peak_time_seconds", "rPeakTimeSeconds"),
   };
 }
 
-/* -------------------------------------------------------------------------- */
-/* UI Components                                                              */
-/* -------------------------------------------------------------------------- */
+/* =========================================================
+   PATIENT DASHBOARD SIGNAL PROCESSING
+   ========================================================= */
 
-function StatusDot({ type = "success" }) {
-  return (
-    <span
-      className={`status-dot ${type}`}
-    />
-  );
+function createLowPassCoefficients(sampleRate, cutoff, q = 0.7071) {
+  const omega = (2 * Math.PI * cutoff) / sampleRate;
+  const alpha = Math.sin(omega) / (2 * q);
+  const cos = Math.cos(omega);
+
+  const b0 = (1 - cos) / 2;
+  const b1 = 1 - cos;
+  const b2 = (1 - cos) / 2;
+
+  const a0 = 1 + alpha;
+  const a1 = -2 * cos;
+  const a2 = 1 - alpha;
+
+  return {
+    b0: b0 / a0,
+    b1: b1 / a0,
+    b2: b2 / a0,
+    a1: a1 / a0,
+    a2: a2 / a0,
+  };
 }
 
-function MetricCard({
-  label,
-  value,
-  unit,
-  description,
-  accent = false,
-}) {
+function createHighPassCoefficients(sampleRate, cutoff, q = 0.7071) {
+  const omega = (2 * Math.PI * cutoff) / sampleRate;
+  const alpha = Math.sin(omega) / (2 * q);
+  const cos = Math.cos(omega);
+
+  const b0 = (1 + cos) / 2;
+  const b1 = -(1 + cos);
+  const b2 = (1 + cos) / 2;
+
+  const a0 = 1 + alpha;
+  const a1 = -2 * cos;
+  const a2 = 1 - alpha;
+
+  return {
+    b0: b0 / a0,
+    b1: b1 / a0,
+    b2: b2 / a0,
+    a1: a1 / a0,
+    a2: a2 / a0,
+  };
+}
+
+function createNotchCoefficients(sampleRate, frequency, q = 30) {
+  const omega = (2 * Math.PI * frequency) / sampleRate;
+  const alpha = Math.sin(omega) / (2 * q);
+  const cos = Math.cos(omega);
+
+  const b0 = 1;
+  const b1 = -2 * cos;
+  const b2 = 1;
+
+  const a0 = 1 + alpha;
+  const a1 = -2 * cos;
+  const a2 = 1 - alpha;
+
+  return {
+    b0: b0 / a0,
+    b1: b1 / a0,
+    b2: b2 / a0,
+    a1: a1 / a0,
+    a2: a2 / a0,
+  };
+}
+
+function applyBiquad(signal, coefficients) {
+  const output = new Float64Array(signal.length);
+
+  let x1 = 0;
+  let x2 = 0;
+  let y1 = 0;
+  let y2 = 0;
+
+  const { b0, b1, b2, a1, a2 } = coefficients;
+
+  for (let i = 0; i < signal.length; i++) {
+    const x0 = signal[i];
+
+    const y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+
+    output[i] = y0;
+
+    x2 = x1;
+    x1 = x0;
+
+    y2 = y1;
+    y1 = y0;
+  }
+
+  return output;
+}
+
+function zeroPhaseFilter(signal, coefficients) {
+  if (signal.length < 10) return signal;
+
+  const forward = applyBiquad(signal, coefficients);
+  const reversed = new Float64Array(forward.length);
+
+  for (let i = 0; i < forward.length; i++) {
+    reversed[i] = forward[forward.length - 1 - i];
+  }
+
+  const backward = applyBiquad(reversed, coefficients);
+  const output = new Float64Array(backward.length);
+
+  for (let i = 0; i < backward.length; i++) {
+    output[i] = backward[backward.length - 1 - i];
+  }
+
+  return output;
+}
+
+function median(values) {
+  if (!values.length) return 0;
+
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+
+  if (sorted.length % 2 === 0) {
+    return (sorted[middle - 1] + sorted[middle]) / 2;
+  }
+
+  return sorted[middle];
+}
+
+function percentile(values, percentileValue) {
+  if (!values.length) return 1;
+
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = (percentileValue / 100) * (sorted.length - 1);
+
+  const lower = Math.floor(index);
+  const upper = Math.ceil(index);
+
+  if (lower === upper) return sorted[lower];
+
+  const weight = index - lower;
+
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * weight;
+}
+
+function movingAverage(signal, windowSize = 3) {
+  if (signal.length < windowSize) return signal;
+
+  const output = new Float64Array(signal.length);
+  const half = Math.floor(windowSize / 2);
+
+  for (let i = 0; i < signal.length; i++) {
+    let sum = 0;
+    let count = 0;
+
+    for (let j = i - half; j <= i + half; j++) {
+      if (j >= 0 && j < signal.length) {
+        sum += signal[j];
+        count++;
+      }
+    }
+
+    output[i] = sum / count;
+  }
+
+  return output;
+}
+
+
+function prepareDisplaySignal(rawSamples, sampleRate) {
+  if (!Array.isArray(rawSamples)) return [];
+
+  const values = rawSamples.map(Number).filter(Number.isFinite);
+
+  // Never display raw ADC values directly.
+  if (values.length < 20) return [];
+
+  const fs =
+    Number.isFinite(Number(sampleRate)) && Number(sampleRate) > 0
+      ? Number(sampleRate)
+      : DEFAULT_SAMPLE_RATE;
+
+  // Keep only the most recent 10 seconds.
+  const maxSamples = Math.max(20, Math.floor(fs * DISPLAY_SECONDS));
+  const window = values.slice(-maxSamples);
+
+  if (window.length < 20) return [];
+
+  // Remove DC offset and baseline displacement.
+  const dcOffset = median(window);
+
+  const centered = new Float64Array(window.length);
+
+  for (let i = 0; i < window.length; i++) {
+    centered[i] = window[i] - dcOffset;
+  }
+
+  /*
+   * Reflection padding reduces filter startup/end artifacts.
+   * This is especially important because the display window
+   * continuously changes as new samples arrive.
+   */
+  const padding = Math.min(Math.floor(fs), Math.floor(centered.length / 3));
+
+  const padded = new Float64Array(centered.length + padding * 2);
+
+  for (let i = 0; i < padding; i++) {
+    padded[padding - 1 - i] = centered[Math.min(i + 1, centered.length - 1)];
+
+    padded[padding + centered.length + i] =
+      centered[Math.max(0, centered.length - 2 - i)];
+  }
+
+  padded.set(centered, padding);
+
+  let filtered = padded;
+
+  // Remove baseline wander.
+  const highPassCutoff = Math.min(0.5, fs * 0.1);
+
+  if (highPassCutoff > 0 && highPassCutoff < fs / 2) {
+    filtered = zeroPhaseFilter(
+      filtered,
+      createHighPassCoefficients(fs, highPassCutoff),
+    );
+  }
+
+  // Remove high-frequency noise.
+  const lowPassCutoff = Math.min(35, fs * 0.4);
+
+  if (lowPassCutoff > 0 && lowPassCutoff < fs / 2) {
+    filtered = zeroPhaseFilter(
+      filtered,
+      createLowPassCoefficients(fs, lowPassCutoff),
+    );
+  }
+
+  // Remove 50 Hz power-line interference when supported.
+  if (fs > 110) {
+    filtered = zeroPhaseFilter(filtered, createNotchCoefficients(fs, 50, 30));
+  }
+
+  // Remove reflection padding.
+  const trimmed = new Float64Array(centered.length);
+
+  for (let i = 0; i < centered.length; i++) {
+    trimmed[i] = filtered[i + padding];
+  }
+
+  // Light smoothing without excessively flattening QRS complexes.
+  const smoothed = movingAverage(trimmed, 3);
+
+  const absoluteValues = Array.from(smoothed)
+    .map(Math.abs)
+    .filter(Number.isFinite);
+
+  const amplitude = Math.max(percentile(absoluteValues, 98.5), 1);
+
+  const scale = amplitude * 1.15;
+
+  const normalized = new Array(smoothed.length);
+
+  for (let i = 0; i < smoothed.length; i++) {
+    normalized[i] = Math.max(-1.25, Math.min(1.25, smoothed[i] / scale));
+  }
+
+  return normalized;
+}
+
+
+/* =========================================================
+   CLINICAL STATUS ANALYSIS
+   ========================================================= */
+
+function analyzeClinicalStatus(qualityData, leadOff, latestPrediction) {
+  const qualityText = String(qualityData?.label || "").toLowerCase();
+
+  const poorSignal =
+    qualityText.includes("poor") || qualityText.includes("bad");
+
+  if (leadOff) {
+    return {
+      type: "warning",
+      title: "Check electrode connection",
+      description: "The ECG electrodes are not making reliable contact.",
+    };
+  }
+
+  if (poorSignal) {
+    return {
+      type: "warning",
+      title: "Signal quality is low",
+      description:
+        "The current ECG recording may not be reliable enough for interpretation.",
+    };
+  }
+
+  if (latestPrediction && ["S", "V", "F"].includes(latestPrediction.code)) {
+    return {
+      type: "warning",
+      title: "Potential rhythm abnormality detected",
+      description:
+        "An abnormal beat classification was detected. Clinical evaluation is recommended.",
+    };
+  }
+
+  if (latestPrediction?.code === "N") {
+    return {
+      type: "success",
+      title: "No significant rhythm abnormality detected",
+      description:
+        "The latest automated beat classification is consistent with a normal beat.",
+    };
+  }
+
+  return {
+    type: "neutral",
+    title: "ECG monitoring in progress",
+    description:
+      "The ECG recording is available, but there is not yet sufficient classification data for a status result.",
+  };
+}
+
+/* =========================================================
+   UI COMPONENTS
+   ========================================================= */
+
+function StatusDot({ type = "success" }) {
+  return <span className={`status-dot ${type}`} />;
+}
+
+function MetricCard({ label, value, unit, description, accent = false }) {
   return (
-    <div
-      className={`metric-card ${
-        accent ? "metric-card-accent" : ""
-      }`}
-    >
-      <div className="metric-card-label">
-        {label}
-      </div>
+    <div className={`metric-card ${accent ? "metric-card-accent" : ""}`}>
+      <div className="metric-card-label">{label}</div>
 
       <div className="metric-card-value">
         {value}
-
-        {unit && (
-          <span className="metric-card-unit">
-            {unit}
-          </span>
-        )}
+        {unit && <span className="metric-card-unit">{unit}</span>}
       </div>
 
       {description && (
-        <div className="metric-card-description">
-          {description}
-        </div>
+        <div className="metric-card-description">{description}</div>
       )}
     </div>
   );
 }
 
-function SectionHeader({
-  eyebrow,
-  title,
-  right,
-}) {
+function SectionHeader({ eyebrow, title, right }) {
   return (
     <div className="section-header">
       <div>
-        {eyebrow && (
-          <div className="section-eyebrow">
-            {eyebrow}
-          </div>
-        )}
-
+        {eyebrow && <div className="section-eyebrow">{eyebrow}</div>}
         <h2>{title}</h2>
       </div>
 
@@ -235,742 +548,1081 @@ function SectionHeader({
   );
 }
 
-/* -------------------------------------------------------------------------- */
-/* ECG Waveform                                                               */
-/*                                                                            */
-/* This is the SAME waveform rendering approach used by the Patient          */
-/* Dashboard: same 10-second display, same grid, same relative amplitude,    */
-/* same incoming WebSocket samples.                                          */
-/* -------------------------------------------------------------------------- */
+/* =========================================================
+   ECG WAVEFORM
+   ========================================================= */
 
-function ECGWaveform({
-  sampleRate,
-  leadOff,
-  samplesRef,
-}) {
+
+function ECGWaveform({ samples, sampleRate }) {
   const canvasRef = useRef(null);
-  const containerRef = useRef(null);
-  const animationRef = useRef(null);
+  const [canvasWidth, setCanvasWidth] = useState(1400);
 
-  const draw = useCallback(() => {
+  const displaySamples = useMemo(
+    () => prepareDisplaySignal(samples, sampleRate),
+    [samples, sampleRate],
+  );
+
+  useEffect(() => {
     const canvas = canvasRef.current;
-    const container =
-      containerRef.current;
+    const container = canvas?.parentElement;
 
-    if (!canvas || !container) {
-      return;
+    if (!container) return;
+
+    const resizeObserver = new ResizeObserver(() => {
+      setCanvasWidth(Math.max(240, Math.floor(container.clientWidth)));
+    });
+
+    resizeObserver.observe(container);
+
+    setCanvasWidth(Math.max(240, Math.floor(container.clientWidth)));
+
+    return () => resizeObserver.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const context = canvas.getContext("2d");
+    if (!context) return;
+
+    const width = canvasWidth;
+    const height = 380;
+    const dpr = window.devicePixelRatio || 1;
+
+    canvas.width = Math.floor(width * dpr);
+    canvas.height = Math.floor(height * dpr);
+
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    context.fillStyle = "#fbfdfb";
+    context.fillRect(0, 0, width, height);
+
+    const paddingLeft = 58;
+    const paddingRight = 20;
+    const paddingTop = 22;
+    const paddingBottom = 38;
+
+    const graphWidth = width - paddingLeft - paddingRight;
+    const graphHeight = height - paddingTop - paddingBottom;
+
+    const graphRight = paddingLeft + graphWidth;
+    const graphBottom = paddingTop + graphHeight;
+    const centerY = paddingTop + graphHeight / 2;
+
+    // ECG grid: small divisions every 0.2 seconds.
+    const minorSpacing = (0.2 / DISPLAY_SECONDS) * graphWidth;
+
+    const majorSpacing = graphWidth / DISPLAY_SECONDS;
+
+    context.lineWidth = 1;
+
+    // Vertical minor grid.
+    for (let x = paddingLeft; x <= graphRight + 1; x += minorSpacing) {
+      context.strokeStyle = "rgba(54, 139, 88, 0.12)";
+      context.beginPath();
+      context.moveTo(x, paddingTop);
+      context.lineTo(x, graphBottom);
+      context.stroke();
     }
 
-    const rect =
-      container.getBoundingClientRect();
-
-    const width = Math.max(
-      1,
-      Math.floor(rect.width)
-    );
-
-    const height = Math.max(
-      220,
-      Math.floor(rect.height)
-    );
-
-    const dpr = Math.min(
-      window.devicePixelRatio || 1,
-      2
-    );
-
-    const pixelWidth =
-      Math.floor(width * dpr);
-
-    const pixelHeight =
-      Math.floor(height * dpr);
-
-    if (
-      canvas.width !== pixelWidth ||
-      canvas.height !== pixelHeight
-    ) {
-      canvas.width = pixelWidth;
-      canvas.height = pixelHeight;
-
-      canvas.style.width = `${width}px`;
-      canvas.style.height = `${height}px`;
+    // Horizontal minor grid.
+    for (let y = paddingTop; y <= graphBottom; y += 20) {
+      context.strokeStyle = "rgba(54, 139, 88, 0.12)";
+      context.beginPath();
+      context.moveTo(paddingLeft, y);
+      context.lineTo(graphRight, y);
+      context.stroke();
     }
 
-    const ctx =
-      canvas.getContext("2d");
-
-    if (!ctx) return;
-
-    ctx.setTransform(
-      dpr,
-      0,
-      0,
-      dpr,
-      0,
-      0
-    );
-
-    ctx.clearRect(
-      0,
-      0,
-      width,
-      height
-    );
-
-    const padding = {
-      left: 58,
-      right: 18,
-      top: 18,
-      bottom: 38,
-    };
-
-    const plotWidth =
-      width -
-      padding.left -
-      padding.right;
-
-    const plotHeight =
-      height -
-      padding.top -
-      padding.bottom;
-
-    const centerY =
-      padding.top +
-      plotHeight / 2;
-
-    const bottom =
-      height - padding.bottom;
-
-    /* Background */
-
-    ctx.fillStyle = "#fbfcff";
-
-    ctx.fillRect(
-      0,
-      0,
-      width,
-      height
-    );
-
-    /* ECG grid */
-
-    const verticalSpacing =
-      plotWidth /
-      (DISPLAY_SECONDS / 0.04);
-
-    const horizontalSpacing =
-      plotHeight / 20;
-
-    for (
-      let x = padding.left, i = 0;
-      x <=
-      width - padding.right + 0.5;
-      x += verticalSpacing, i++
-    ) {
-      ctx.beginPath();
-
-      ctx.lineWidth =
-        i % 5 === 0 ? 1 : 0.6;
-
-      ctx.strokeStyle =
-        i % 5 === 0
-          ? "rgba(120,145,194,.14)"
-          : "rgba(120,145,194,.055)";
-
-      ctx.moveTo(
-        x,
-        padding.top
-      );
-
-      ctx.lineTo(
-        x,
-        bottom
-      );
-
-      ctx.stroke();
+    // Major vertical grid.
+    for (let x = paddingLeft; x <= graphRight + 1; x += majorSpacing) {
+      context.strokeStyle = "rgba(54, 139, 88, 0.22)";
+      context.beginPath();
+      context.moveTo(x, paddingTop);
+      context.lineTo(x, graphBottom);
+      context.stroke();
     }
 
-    for (
-      let y = padding.top, i = 0;
-      y <= bottom + 0.5;
-      y += horizontalSpacing, i++
-    ) {
-      ctx.beginPath();
-
-      ctx.lineWidth =
-        i % 5 === 0 ? 1 : 0.6;
-
-      ctx.strokeStyle =
-        i % 5 === 0
-          ? "rgba(120,145,194,.14)"
-          : "rgba(120,145,194,.055)";
-
-      ctx.moveTo(
-        padding.left,
-        y
-      );
-
-      ctx.lineTo(
-        width - padding.right,
-        y
-      );
-
-      ctx.stroke();
+    // Major horizontal grid.
+    for (let y = paddingTop; y <= graphBottom; y += 100) {
+      context.strokeStyle = "rgba(54, 139, 88, 0.22)";
+      context.beginPath();
+      context.moveTo(paddingLeft, y);
+      context.lineTo(graphRight, y);
+      context.stroke();
     }
 
-    /* Center line */
+    // Center baseline.
+    context.strokeStyle = "rgba(47, 125, 77, 0.32)";
+    context.lineWidth = 1;
 
-    ctx.beginPath();
+    context.beginPath();
+    context.moveTo(paddingLeft, centerY);
+    context.lineTo(graphRight, centerY);
+    context.stroke();
 
-    ctx.lineWidth = 1;
-    ctx.strokeStyle =
-      "rgba(120,145,194,.19)";
+    // Graph border.
+    context.strokeStyle = "rgba(47, 125, 77, 0.45)";
 
-    ctx.moveTo(
-      padding.left,
-      centerY
-    );
+    context.beginPath();
+    context.moveTo(paddingLeft, paddingTop);
+    context.lineTo(paddingLeft, graphBottom);
+    context.lineTo(graphRight, graphBottom);
+    context.stroke();
 
-    ctx.lineTo(
-      width - padding.right,
-      centerY
-    );
+    // Vertical axis labels.
+    context.fillStyle = "rgba(67, 95, 77, 0.82)";
+    context.font = "11px Inter, Arial, sans-serif";
+    context.textAlign = "right";
 
-    ctx.stroke();
+    [
+      { text: "+1", y: centerY - graphHeight * 0.35 },
+      { text: "0", y: centerY + 4 },
+      { text: "-1", y: centerY + graphHeight * 0.35 },
+    ].forEach((label) => {
+      context.fillText(label.text, paddingLeft - 10, label.y);
+    });
 
-    /* Labels */
+    // Time axis labels.
+    context.textAlign = "center";
 
-    ctx.fillStyle = "#8995aa";
-    ctx.font =
-      "11px Inter, system-ui, sans-serif";
+    const labelInterval = width < 600 ? 2 : 1;
 
-    ctx.textAlign = "right";
-    ctx.textBaseline = "middle";
+    for (let second = 0; second <= DISPLAY_SECONDS; second += labelInterval) {
+      const x = paddingLeft + (second / DISPLAY_SECONDS) * graphWidth;
 
-    ctx.fillText(
-      "+scale",
-      padding.left - 9,
-      padding.top
-    );
-
-    ctx.fillText(
-      "0",
-      padding.left - 9,
-      centerY
-    );
-
-    ctx.fillText(
-      "−scale",
-      padding.left - 9,
-      bottom
-    );
-
-    ctx.textAlign = "center";
-    ctx.textBaseline = "top";
-
-    for (let i = 0; i <= 5; i++) {
-      ctx.fillText(
-        `${(
-          (DISPLAY_SECONDS * i) /
-          5
-        ).toFixed(0)}s`,
-        padding.left +
-          (plotWidth * i) / 5,
-        height - 27
-      );
+      context.fillText(`${second}s`, x, graphBottom + 22);
     }
 
-    ctx.textAlign = "left";
+    // Show waiting message until enough filtered samples exist.
+    if (!displaySamples || displaySamples.length < 20) {
+      context.fillStyle = "rgba(67, 95, 77, 0.65)";
+      context.font = "14px Inter, Arial, sans-serif";
+      context.textAlign = "center";
 
-    ctx.fillText(
-      "Live ECG · relative amplitude",
-      padding.left,
-      4
-    );
-
-    /* Samples */
-
-    const allSamples =
-      samplesRef.current;
-
-    const count = Math.min(
-      allSamples.length,
-      Math.max(
-        1,
-        Math.floor(
-          (Number(sampleRate) ||
-            DEFAULT_SAMPLE_RATE) *
-            DISPLAY_SECONDS
-        )
-      )
-    );
-
-    if (count < 2) {
-      ctx.fillStyle = "#8995aa";
-
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-
-      ctx.font =
-        "13px Inter, system-ui, sans-serif";
-
-      ctx.fillText(
-        "Connecting to your ECG monitor…",
-        width / 2,
-        centerY
-      );
+      context.fillText("Waiting for ECG signal...", width / 2, centerY);
 
       return;
     }
 
-    const samples =
-      allSamples.slice(-count);
+    const fs =
+      Number.isFinite(Number(sampleRate)) && Number(sampleRate) > 0
+        ? Number(sampleRate)
+        : DEFAULT_SAMPLE_RATE;
 
-    const sorted = [
-      ...samples,
-    ].sort((a, b) => a - b);
+    /*
+     * Use actual elapsed time for horizontal positioning.
+     * An incomplete recording is no longer stretched to fill
+     * the entire 10-second window.
+     */
+    const count = displaySamples.length;
 
-    const percentile = (q) => {
-      const index = Math.min(
-        sorted.length - 1,
-        Math.max(
-          0,
-          Math.floor(
-            (sorted.length - 1) * q
-          )
-        )
-      );
+    const visibleDuration = Math.min(DISPLAY_SECONDS, (count - 1) / fs);
 
-      return sorted[index];
-    };
+    const startTime = DISPLAY_SECONDS - visibleDuration;
 
-    const center =
-      (percentile(0.05) +
-        percentile(0.95)) /
-      2;
+    context.save();
 
-    const deviations = [
-      ...samples,
-    ]
-      .map((value) =>
-        Math.abs(value - center)
-      )
-      .sort((a, b) => a - b);
+    // Prevent drawing outside the graph.
+    context.beginPath();
+    context.rect(paddingLeft, paddingTop, graphWidth, graphHeight);
+    context.clip();
 
-    const amplitude = Math.max(
-      (deviations[
-        Math.min(
-          deviations.length - 1,
-          Math.floor(
-            deviations.length * 0.95
-          )
-        )
-      ] || 1) * 1.35,
-      1
-    );
+    context.beginPath();
+    context.lineWidth = 2;
+    context.strokeStyle = "#258a50";
+    context.lineJoin = "round";
+    context.lineCap = "round";
 
-    const scale =
-      (plotHeight * 0.46) /
-      amplitude;
+    for (let i = 0; i < count; i++) {
+      const elapsedTime = i / fs;
 
-    /* Waveform */
-
-    ctx.beginPath();
-
-    for (
-      let i = 0;
-      i < samples.length;
-      i++
-    ) {
       const x =
-        padding.left +
-        (i /
-          (samples.length - 1)) *
-          plotWidth;
+        paddingLeft +
+        ((startTime + elapsedTime) / DISPLAY_SECONDS) * graphWidth;
 
-      const y = Math.max(
-        padding.top + 2,
-        Math.min(
-          bottom - 2,
-          centerY -
-            (Number(samples[i]) -
-              center) *
-              scale
-        )
-      );
+      const y = centerY - displaySamples[i] * graphHeight * 0.38;
 
       if (i === 0) {
-        ctx.moveTo(x, y);
+        context.moveTo(x, y);
       } else {
-        ctx.lineTo(x, y);
+        context.lineTo(x, y);
       }
     }
 
-    ctx.lineWidth = 1.7;
-    ctx.lineJoin = "round";
-    ctx.lineCap = "round";
+    context.stroke();
+    context.restore();
 
-    ctx.strokeStyle = leadOff
-      ? "#d58a82"
-      : "#55a88d";
+    // Axis descriptions.
+    context.fillStyle = "rgba(67, 95, 77, 0.72)";
+    context.font = "11px Inter, Arial, sans-serif";
+    context.textAlign = "center";
 
-    ctx.stroke();
+    context.fillText("Time", paddingLeft + graphWidth / 2, height - 8);
 
-    /* Current point */
+    context.save();
 
-    const last =
-      Number(
-        samples[
-          samples.length - 1
-        ]
-      );
+    context.translate(14, paddingTop + graphHeight / 2);
 
-    const lastY = Math.max(
-      padding.top + 2,
-      Math.min(
-        bottom - 2,
-        centerY -
-          (last - center) *
-            scale
-      )
-    );
+    context.rotate(-Math.PI / 2);
 
-    ctx.beginPath();
+    context.fillText("Relative amplitude", 0, 0);
 
-    ctx.arc(
-      width - padding.right,
-      lastY,
-      3,
-      0,
-      Math.PI * 2
-    );
-
-    ctx.fillStyle = leadOff
-      ? "#d58a82"
-      : "#82c6a8";
-
-    ctx.fill();
-  }, [
-    sampleRate,
-    leadOff,
-    samplesRef,
-  ]);
-
-  useEffect(() => {
-    let stopped = false;
-
-    const render = () => {
-      if (stopped) return;
-
-      draw();
-
-      animationRef.current =
-        requestAnimationFrame(
-          render
-        );
-    };
-
-    animationRef.current =
-      requestAnimationFrame(
-        render
-      );
-
-    const handleResize =
-      () => draw();
-
-    window.addEventListener(
-      "resize",
-      handleResize
-    );
-
-    const observer =
-      new ResizeObserver(
-        handleResize
-      );
-
-    if (containerRef.current) {
-      observer.observe(
-        containerRef.current
-      );
-    }
-
-    return () => {
-      stopped = true;
-
-      cancelAnimationFrame(
-        animationRef.current
-      );
-
-      window.removeEventListener(
-        "resize",
-        handleResize
-      );
-
-      observer.disconnect();
-    };
-  }, [draw]);
+    context.restore();
+  }, [displaySamples, sampleRate, canvasWidth]);
 
   return (
-    <div
-      ref={containerRef}
-      className="ecg-waveform"
-    >
-      <canvas ref={canvasRef} />
+    <div className="ecg-waveform">
+      <canvas ref={canvasRef} className="ecg-canvas" />
     </div>
   );
 }
 
-/* -------------------------------------------------------------------------- */
-/* Main                                                                       */
-/* -------------------------------------------------------------------------- */
+
+/* =========================================================
+   PATIENT REPORT MODAL
+   ========================================================= */
+
+const ML_CLASS_LABELS = {
+  N: "Normal",
+  S: "Supraventricular",
+  V: "Ventricular",
+  F: "Fusion",
+  Q: "Unclassified",
+};
+
+function reportValue(value, suffix = "") {
+  if (value === null || value === undefined || value === "") {
+    return "Not available";
+  }
+
+  return `${value}${suffix}`;
+}
+
+function formatReportDate(value) {
+  if (!value) return "Not available";
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return String(value);
+
+  return date.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function safePercent(value) {
+  const number = Number(value);
+
+  if (!Number.isFinite(number)) return 0;
+
+  return Math.min(100, Math.max(0, number));
+}
+
+/*
+ * bpmSnapshot is captured by the dashboard when the report button
+ * is clicked. It is intentionally not recalculated inside this modal.
+ */
+function PatientReportModal({ sessionId, bpmSnapshot, onClose }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!sessionId) {
+      setError("There is no active ECG session to generate a report.");
+      setLoading(false);
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    let active = true;
+
+    async function loadReport() {
+      setLoading(true);
+      setError("");
+      setData(null);
+
+      try {
+        const response = await fetch(
+          `${API_BASE}/api/session/${encodeURIComponent(
+            sessionId,
+          )}/report-data`,
+          {
+            method: "GET",
+            headers: { Accept: "application/json" },
+            cache: "no-store",
+            signal: controller.signal,
+          },
+        );
+
+        if (!response.ok) {
+          let detail = `Server responded with ${response.status}`;
+
+          try {
+            const body = await response.json();
+            detail = body.detail || body.message || detail;
+          } catch {
+            // Keep HTTP status message.
+          }
+
+          throw new Error(detail);
+        }
+
+        const payload = await response.json();
+
+        if (!payload || typeof payload !== "object" || !payload.session) {
+          throw new Error("The backend returned an invalid report response.");
+        }
+
+        if (active) setData(payload);
+      } catch (fetchError) {
+        if (active && fetchError.name !== "AbortError") {
+          setError(fetchError.message || "Unable to load report data.");
+        }
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    loadReport();
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [sessionId]);
+
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") onClose();
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [onClose]);
+
+  const handlePrint = useCallback(() => {
+    window.print();
+  }, []);
+
+  const handleBackdropClick = useCallback(
+    (event) => {
+      if (event.target === event.currentTarget) onClose();
+    },
+    [onClose],
+  );
+
+  const session = data?.session ?? {};
+  const measurements = data?.measurements ?? {};
+  const ml = data?.ml ?? {};
+  const quality = data?.signal_quality ?? {};
+  const distribution = ml?.class_distribution ?? {};
+
+  const predictionCount = Number(ml?.total_predictions ?? 0);
+
+  const hasPredictions =
+    Number.isFinite(predictionCount) && predictionCount > 0;
+
+  /*
+   * Freeze the supplied snapshot as a display string.
+   * This value remains unchanged for the lifetime of this report.
+   */
+  const fixedReportBpm =
+    bpmSnapshot !== null &&
+    bpmSnapshot !== undefined &&
+    bpmSnapshot !== "" &&
+    Number.isFinite(Number(bpmSnapshot))
+      ? Number(bpmSnapshot).toFixed(1)
+      : "Not available";
+
+  return (
+    <div
+      className="report-backdrop"
+      role="presentation"
+      onMouseDown={handleBackdropClick}
+    >
+      <section
+        className="report-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="patient-report-title"
+      >
+        <header className="report-modal-header">
+          <div>
+            <div className="report-modal-eyebrow">DOCTOR DASHBOARD</div>
+
+            <h2 className="report-modal-title" id="patient-report-title">
+              Patient ECG Report
+            </h2>
+
+            <p className="report-modal-session">
+              Session: {sessionId || "Not available"}
+            </p>
+          </div>
+
+          <div className="report-modal-actions">
+            {!loading && !error && data && (
+              <button
+                id="report-download-pdf-btn"
+                className="btn-report-print"
+                type="button"
+                onClick={handlePrint}
+              >
+                <span aria-hidden="true">↓</span> Print / Save PDF
+              </button>
+            )}
+
+            <button
+              id="report-close-btn"
+              className="btn-report-close"
+              type="button"
+              onClick={onClose}
+              aria-label="Close report"
+            >
+              ×
+            </button>
+          </div>
+        </header>
+
+        <div className="report-modal-body">
+          {loading && (
+            <div className="report-state" role="status">
+              <span className="report-spinner" />
+              <strong>Preparing report</strong>
+              <span>Retrieving stored ECG session data…</span>
+            </div>
+          )}
+
+          {!loading && error && (
+            <div className="report-state report-state-error" role="alert">
+              <strong>Unable to generate report</strong>
+              <span>{error}</span>
+              <span className="report-state-help">
+                Confirm that the backend is running and that its report-data
+                endpoint is available.
+              </span>
+            </div>
+          )}
+
+          {!loading && !error && data && (
+            <article id="report-printable-area">
+              <div className="report-print-header">
+                <div className="report-print-logo">♥ ECG Clinical Monitor</div>
+
+                <div className="report-print-subtitle">
+                  Patient ECG Session Report
+                </div>
+
+                <div className="report-print-meta">
+                  Generated: {formatReportDate(data.generated_at)}
+                </div>
+
+                <div className="report-source-note">
+                  Report values are retrieved from records stored for this ECG
+                  session. The dashboard BPM snapshot is captured when this
+                  report is requested.
+                </div>
+              </div>
+
+              <section className="report-section">
+                <h3 className="report-section-title">Session Information</h3>
+
+                <div className="report-info-grid">
+                  <div className="report-info-item">
+                    <span>Session ID</span>
+                    <strong>{reportValue(session.session_id)}</strong>
+                  </div>
+
+                  <div className="report-info-item">
+                    <span>Device</span>
+                    <strong>{reportValue(session.device_id)}</strong>
+                  </div>
+
+                  <div className="report-info-item">
+                    <span>Lead</span>
+                    <strong>{reportValue(session.lead)}</strong>
+                  </div>
+
+                  <div className="report-info-item">
+                    <span>Status</span>
+                    <strong>{reportValue(session.status)}</strong>
+                  </div>
+
+                  <div className="report-info-item">
+                    <span>Started</span>
+                    <strong>{formatReportDate(session.started_at)}</strong>
+                  </div>
+
+                  <div className="report-info-item">
+                    <span>Ended</span>
+                    <strong>{formatReportDate(session.ended_at)}</strong>
+                  </div>
+
+                  <div className="report-info-item">
+                    <span>Sampling rate</span>
+                    <strong>{reportValue(session.sampling_rate, " Hz")}</strong>
+                  </div>
+
+                  <div className="report-info-item">
+                    <span>Samples received</span>
+                    <strong>
+                      {session.samples_received == null
+                        ? "Not available"
+                        : Number(session.samples_received).toLocaleString()}
+                    </strong>
+                  </div>
+
+                  <div className="report-info-item">
+                    <span>Packets received</span>
+                    <strong>
+                      {session.packets_received == null
+                        ? "Not available"
+                        : Number(session.packets_received).toLocaleString()}
+                    </strong>
+                  </div>
+                </div>
+
+                <p className="report-identity-note">
+                  Patient identity details are not stored in the current ECG
+                  session record.
+                </p>
+              </section>
+
+              <section className="report-section">
+                <h3 className="report-section-title">
+                  ECG Measurement Summary
+                </h3>
+
+                <div className="report-metrics-row">
+                  <div className="report-metric-card report-metric-accent">
+                    <span className="report-metric-label">
+                      Average recorded heart rate
+                    </span>
+
+                    <strong className="report-metric-value">
+                      {reportValue(measurements.avg_heart_rate_bpm)}
+                      <small>BPM</small>
+                    </strong>
+
+                    <span className="report-metric-sub">
+                      Min {reportValue(measurements.min_heart_rate_bpm)}
+                      {" · "}
+                      Max {reportValue(measurements.max_heart_rate_bpm)}
+                    </span>
+                  </div>
+
+                  {/* Fixed BPM snapshot matching the dashboard */}
+                  <div className="report-metric-card">
+                    <span className="report-metric-label">
+                      Dashboard BPM snapshot
+                    </span>
+
+                    <strong className="report-metric-value">
+                      {fixedReportBpm}
+                      <small>BPM</small>
+                    </strong>
+
+                    <span className="report-metric-sub">
+                      Captured when the report was generated
+                    </span>
+                  </div>
+
+                  <div className="report-metric-card">
+                    <span className="report-metric-label">
+                      Average RR interval
+                    </span>
+
+                    <strong className="report-metric-value">
+                      {reportValue(measurements.avg_rr_interval_ms)}
+                      <small>MS</small>
+                    </strong>
+
+                    <span className="report-metric-sub">
+                      Latest{" "}
+                      {reportValue(measurements.latest_rr_interval_ms, " ms")}
+                    </span>
+                  </div>
+
+                  <div className="report-metric-card">
+                    <span className="report-metric-label">
+                      Measurement records
+                    </span>
+
+                    <strong className="report-metric-value">
+                      {measurements.count == null
+                        ? "—"
+                        : Number(measurements.count).toLocaleString()}
+                    </strong>
+
+                    <span className="report-metric-sub">Stored readings</span>
+                  </div>
+                </div>
+
+                <p className="report-identity-note">
+                  The dashboard BPM snapshot is a presentation value and is
+                  separate from the stored session measurements. The average,
+                  minimum, and maximum heart rates above are retrieved from the
+                  backend session records.
+                </p>
+
+                <div className="report-info-grid">
+                  <div className="report-info-item">
+                    <span>Latest recorded heart rate</span>
+                    <strong>
+                      {reportValue(measurements.latest_heart_rate_bpm, " BPM")}
+                    </strong>
+                  </div>
+
+                  <div className="report-info-item">
+                    <span>Latest measurement time</span>
+                    <strong>
+                      {formatReportDate(measurements.latest_recorded_at)}
+                    </strong>
+                  </div>
+                </div>
+              </section>
+
+              <section className="report-section">
+                <h3 className="report-section-title">
+                  AI Beat Classification · SmartECG-HD
+                </h3>
+
+                {!hasPredictions ? (
+                  <div className="report-empty-note">
+                    No ML predictions are stored for this session.
+                  </div>
+                ) : (
+                  <>
+                    <div className="report-ml-summary">
+                      <div>
+                        <span>Total classified beats</span>
+                        <strong>{predictionCount.toLocaleString()}</strong>
+                      </div>
+
+                      <div>
+                        <span>Average confidence</span>
+                        <strong>
+                          {reportValue(ml.avg_confidence_pct, "%")}
+                        </strong>
+                      </div>
+
+                      <div>
+                        <span>Latest classification</span>
+                        <strong>
+                          {ml.last_predicted_class
+                            ? `${
+                                ML_CLASS_LABELS[ml.last_predicted_class] ||
+                                ml.last_predicted_class
+                              } (${reportValue(ml.last_confidence_pct, "%")})`
+                            : "Not available"}
+                        </strong>
+                      </div>
+
+                      <div>
+                        <span>Model</span>
+                        <strong>{reportValue(ml.model_name)}</strong>
+                      </div>
+                    </div>
+
+                    <div className="report-beat-dist">
+                      {Object.entries(distribution).map(([code, rawInfo]) => {
+                        const info =
+                          rawInfo && typeof rawInfo === "object" ? rawInfo : {};
+
+                        const count = Number(info.count ?? 0);
+                        const percent = safePercent(info.percent);
+
+                        return (
+                          <div key={code} className="report-beat-row">
+                            <div
+                              className={`report-beat-code report-code-${code}`}
+                            >
+                              {code}
+                            </div>
+
+                            <div className="report-beat-info">
+                              <div className="report-beat-label">
+                                {ML_CLASS_LABELS[code] || code}
+                              </div>
+
+                              <div className="report-beat-bar-track">
+                                <div
+                                  className={`report-beat-bar report-bar-${code}`}
+                                  style={{ width: `${percent}%` }}
+                                />
+                              </div>
+                            </div>
+
+                            <div className="report-beat-stats">
+                              <strong>
+                                {Number.isFinite(count)
+                                  ? count.toLocaleString()
+                                  : "—"}
+                              </strong>
+
+                              <span>{percent.toFixed(1)}%</span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
+
+                <p className="report-identity-note">
+                  Automated beat classes are research-support outputs and must
+                  not be treated as a standalone diagnosis.
+                </p>
+              </section>
+
+              <section className="report-section">
+                <h3 className="report-section-title">Signal Quality</h3>
+
+                <div className="report-info-grid">
+                  <div className="report-info-item">
+                    <span>Quality score</span>
+                    <strong>
+                      {quality.score == null
+                        ? "Not available"
+                        : `${quality.score} / 100`}
+                    </strong>
+                  </div>
+
+                  <div className="report-info-item">
+                    <span>Quality label</span>
+                    <strong>{reportValue(quality.label)}</strong>
+                  </div>
+
+                  <div className="report-info-item">
+                    <span>Baseline wander</span>
+                    <strong>{reportValue(quality.baseline_wander)}</strong>
+                  </div>
+
+                  <div className="report-info-item">
+                    <span>Noise RMS</span>
+                    <strong>{reportValue(quality.noise_rms)}</strong>
+                  </div>
+
+                  <div className="report-info-item">
+                    <span>Peaks detected</span>
+                    <strong>
+                      {quality.peak_count == null
+                        ? "Not available"
+                        : Number(quality.peak_count).toLocaleString()}
+                    </strong>
+                  </div>
+
+                  <div className="report-info-item">
+                    <span>Recorded at</span>
+                    <strong>{formatReportDate(quality.recorded_at)}</strong>
+                  </div>
+                </div>
+              </section>
+
+              <div className="report-disclaimer">
+                <strong>Research prototype disclaimer:</strong> This report
+                summarizes data stored by the ECG monitoring prototype.
+                Automated metrics and classifications are intended to support
+                research and review; they are not a medical diagnosis or a
+                substitute for assessment by a qualified healthcare
+                professional.
+              </div>
+            </article>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+/* =========================================================
+   MAIN APPLICATION
+   ========================================================= */
 
 export default function App() {
-  const [
-    connection,
-    setConnection,
-  ] = useState("connecting");
+  const [connection, setConnection] = useState("connecting");
+  const [sampleRate, setSampleRate] = useState(DEFAULT_SAMPLE_RATE);
+  const [deviceId, setDeviceId] = useState(DEVICE_ID);
+  const [sessionId, setSessionId] = useState(null);
+  const [analysis, setAnalysis] = useState({});
+  const [quality, setQuality] = useState({});
+  const [leadOff, setLeadOff] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [latestPrediction, setLatestPrediction] = useState(null);
 
-  const [
-    sampleRate,
-    setSampleRate,
-  ] = useState(DEFAULT_SAMPLE_RATE);
+  const qualityData = useMemo(() => normalizeQuality(quality), [quality]);
 
-  const [
-    deviceId,
-    setDeviceId,
-  ] = useState(DEVICE_ID);
+  const samplesRef = useRef([]);
+  const [waveformSamples, setWaveformSamples] = useState([]);
 
-  const [
-    sessionId,
-    setSessionId,
-  ] = useState(null);
+  const wsRef = useRef(null);
+  const recordingStartRef = useRef(null);
 
-  const [
-    analysis,
-    setAnalysis,
-  ] = useState({});
+  const [showReport, setShowReport] = useState(false);
 
-  const [
-    quality,
-    setQuality,
-  ] = useState({});
+  /*
+   * Stores the BPM snapshot passed to the report.
+   * It is deliberately separate from formattedHR so that
+   * live updates cannot change an already-open report.
+   */
+  const [reportBpmSnapshot, setReportBpmSnapshot] = useState(null);
 
-  const [
-    leadOff,
-    setLeadOff,
-  ] = useState(false);
-
-  const [
-    recordingSeconds,
-    setRecordingSeconds,
-  ] = useState(0);
-
-  const [
-    latestPrediction,
-    setLatestPrediction,
-  ] = useState(null);
-
-  const samplesRef =
-    useRef([]);
-
-  const wsRef =
-    useRef(null);
-
-  const reconnectRef =
-    useRef(null);
-
-  const recordingStartRef =
-    useRef(null);
-
-  /* ---------------------------------------------------------------------- */
-  /* WebSocket                                                              */
-  /* ---------------------------------------------------------------------- */
+  /* =========================================================
+     WEBSOCKET CONNECTION
+     ========================================================= */
 
   useEffect(() => {
     let destroyed = false;
+    let reconnectTimer = null;
+    let reconnectDelay = 1000;
+    let socket = null;
+
+    const MAX_RECONNECT_DELAY = 10000;
+
+    const scheduleReconnect = () => {
+      if (destroyed || reconnectTimer !== null) return;
+
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+
+        if (!destroyed) connect();
+      }, reconnectDelay);
+
+      reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+    };
 
     const connect = () => {
       if (destroyed) return;
 
-      setConnection(
-        "connecting"
-      );
+      if (
+        socket &&
+        (socket.readyState === WebSocket.OPEN ||
+          socket.readyState === WebSocket.CONNECTING)
+      ) {
+        return;
+      }
 
-      const socket =
-        new WebSocket(WS_URL);
+      setConnection("connecting");
 
-      wsRef.current = socket;
+      let ws;
 
-      socket.onopen = () => {
-        if (destroyed) return;
+      try {
+        ws = new WebSocket(WS_URL);
+        socket = ws;
+        wsRef.current = ws;
+      } catch (error) {
+        console.error("Unable to create ECG WebSocket:", error);
+        setConnection("error");
+        scheduleReconnect();
+        return;
+      }
 
-        setConnection(
-          "connected"
-        );
+      ws.onopen = () => {
+        if (destroyed || socket !== ws) return;
 
-        if (
-          !recordingStartRef.current
-        ) {
-          recordingStartRef.current =
-            Date.now();
+        console.info("ECG WebSocket connected:", WS_URL);
+
+        reconnectDelay = 1000;
+        setConnection("connected");
+
+        if (!recordingStartRef.current) {
+          recordingStartRef.current = Date.now();
         }
       };
 
-      socket.onmessage = (
-        event
-      ) => {
+      ws.onmessage = (event) => {
+        if (destroyed || socket !== ws) return;
+
         try {
+          const parsed =
+            typeof event.data === "string" ? JSON.parse(event.data) : null;
+
+          if (!parsed || typeof parsed !== "object") return;
+
           const message =
-            JSON.parse(
-              event.data
-            );
+            parsed.payload && typeof parsed.payload === "object"
+              ? { ...parsed, ...parsed.payload }
+              : parsed;
+
+          const incomingDeviceId = message.device_id ?? message.deviceId;
 
           if (
-            message.type ===
-            "ecg"
+            incomingDeviceId != null &&
+            String(incomingDeviceId) !== String(DEVICE_ID)
           ) {
-            const incoming =
-              Array.isArray(
-                message.samples
-              )
-                ? message.samples
-                    .map(Number)
-                    .filter(
-                      Number.isFinite
-                    )
-                : [];
+            return;
+          }
 
-            const rate =
-              Number(
-                message.sampling_rate
-              ) ||
-              DEFAULT_SAMPLE_RATE;
+          if (message.type === "connection") {
+            const connectionRate = Number(
+              message.sampling_rate ?? message.sample_rate,
+            );
 
+            if (Number.isFinite(connectionRate) && connectionRate > 0) {
+              setSampleRate(connectionRate);
+            }
+
+            return;
+          }
+
+          const analysisData =
+            message.analysis || message.metrics || message.vitals || {};
+
+          const qualityData =
+            message.quality || message.signal_quality || message.signalQuality;
+
+          const rawSamples = Array.isArray(message.samples)
+            ? message.samples
+            : Array.isArray(message.ecg_samples)
+              ? message.ecg_samples
+              : Array.isArray(message.data)
+                ? message.data
+                : Array.isArray(message.ecg)
+                  ? message.ecg
+                  : [];
+
+          const incoming = rawSamples.map(Number).filter(Number.isFinite);
+
+          const rate = Number(
+            message.sampling_rate ?? message.sample_rate ?? message.fs,
+          );
+
+          if (Number.isFinite(rate) && rate > 0) {
             setSampleRate(rate);
+          }
 
-            setDeviceId(
-              message.device_id ||
-                DEVICE_ID
-            );
+          if (message.device_id || message.deviceId) {
+            setDeviceId(message.device_id || message.deviceId);
+          }
 
+          const rawLeadOff =
+            message.lead_off ?? message.leadOff ?? message.lead_off_detected;
+
+          if (rawLeadOff !== undefined) {
             setLeadOff(
-              Boolean(
-                message.lead_off
-              )
+              rawLeadOff === true ||
+                rawLeadOff === 1 ||
+                rawLeadOff === "true" ||
+                rawLeadOff === "1",
             );
+          }
 
-            if (
-              message.session_id
-            ) {
-              setSessionId(
-                message.session_id
-              );
-            }
+          const receivedSession = message.session_id ?? message.sessionId;
 
-            if (
-              message.analysis
-            ) {
-              setAnalysis(
-                message.analysis
-              );
-            }
+          if (receivedSession != null) {
+            setSessionId(receivedSession);
+          }
 
-            if (
-              message.quality
-            ) {
-              setQuality(
-                message.quality
-              );
-            }
+          if (Object.keys(analysisData).length > 0) {
+            setAnalysis((previous) => ({
+              ...previous,
+              ...analysisData,
+            }));
+          } else {
+            const hasMetrics = [
+              "heart_rate_bpm",
+              "heart_rate",
+              "hr",
+              "rr_interval_ms",
+              "rr_interval",
+              "rr",
+              "peak_count",
+              "r_peak_count",
+            ].some((key) => message[key] != null);
 
-            if (
-              message.ml
-            ) {
-              const prediction =
-                normalizePrediction(
-                  message.ml
-                );
-
-              if (prediction) {
-                setLatestPrediction(
-                  prediction
-                );
-              }
-            }
-
-            if (
-              incoming.length
-            ) {
-              const maxSamples =
-                Math.max(
-                  100,
-                  Math.floor(
-                    rate *
-                      DISPLAY_SECONDS
-                  )
-                );
-
-              samplesRef.current =
-                samplesRef.current
-                  .concat(incoming)
-                  .slice(
-                    -maxSamples
-                  );
-            }
-
-            if (
-              !recordingStartRef.current
-            ) {
-              recordingStartRef.current =
-                Date.now();
+            if (hasMetrics) {
+              setAnalysis((previous) => ({
+                ...previous,
+                ...message,
+              }));
             }
           }
 
-          if (
-            message.type ===
-              "ml_prediction" ||
-            message.type ===
-              "prediction"
-          ) {
-            const prediction =
-              normalizePrediction(
-                message.prediction ||
-                  message.ml ||
-                  message
-              );
+          if (qualityData !== undefined && qualityData !== null) {
+            setQuality(qualityData);
+          }
+
+          const predictionPayload =
+            message.ml || message.prediction || message.heartbeat_analysis;
+
+          if (message.type === "ml_prediction" || predictionPayload) {
+            const prediction = normalizePrediction(
+              predictionPayload || message,
+            );
 
             if (prediction) {
-              setLatestPrediction(
-                prediction
-              );
+              setLatestPrediction(prediction);
             }
           }
+
+          if (incoming.length > 0) {
+            const effectiveRate =
+              Number.isFinite(rate) && rate > 0 ? rate : DEFAULT_SAMPLE_RATE;
+
+            const maxBufferSamples = Math.max(
+              100,
+              Math.floor(effectiveRate * MAX_BUFFER_SECONDS),
+            );
+
+            samplesRef.current = [...samplesRef.current, ...incoming].slice(
+              -maxBufferSamples,
+            );
+
+            const displayCount = Math.max(
+              2,
+              Math.floor(effectiveRate * DISPLAY_SECONDS),
+            );
+
+            setWaveformSamples(samplesRef.current.slice(-displayCount));
+          }
+
+          if (incoming.length > 0 && !recordingStartRef.current) {
+            recordingStartRef.current = Date.now();
+          }
         } catch (error) {
-          console.error(
-            "ECG WebSocket message error:",
-            error
-          );
+          console.error("ECG WebSocket message error:", error);
         }
       };
 
-      socket.onerror = () => {
-        if (destroyed) return;
+      ws.onerror = (error) => {
+        if (destroyed || socket !== ws) return;
 
+        console.error("ECG WebSocket error:", error);
         setConnection("error");
       };
 
-      socket.onclose = () => {
+      ws.onclose = (event) => {
+        if (socket === ws) {
+          socket = null;
+
+          if (wsRef.current === ws) {
+            wsRef.current = null;
+          }
+        }
+
         if (destroyed) return;
 
-        setConnection(
-          "disconnected"
+        console.warn(
+          "ECG WebSocket closed:",
+          event.code,
+          event.reason || "No reason provided",
         );
 
-        reconnectRef.current =
-          setTimeout(
-            connect,
-            2000
-          );
+        setConnection("disconnected");
+        scheduleReconnect();
       };
     };
 
@@ -979,170 +1631,179 @@ export default function App() {
     return () => {
       destroyed = true;
 
-      clearTimeout(
-        reconnectRef.current
-      );
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+      }
 
-      wsRef.current?.close();
+      if (wsRef.current) {
+        const activeSocket = wsRef.current;
+
+        activeSocket.onopen = null;
+        activeSocket.onmessage = null;
+        activeSocket.onerror = null;
+        activeSocket.onclose = null;
+
+        if (
+          activeSocket.readyState === WebSocket.OPEN ||
+          activeSocket.readyState === WebSocket.CONNECTING
+        ) {
+          activeSocket.close();
+        }
+
+        wsRef.current = null;
+      }
+
+      socket = null;
     };
   }, []);
 
-  /* ---------------------------------------------------------------------- */
-  /* Recording timer                                                        */
-  /* ---------------------------------------------------------------------- */
+  /* =========================================================
+     RECORDING TIMER
+     ========================================================= */
 
   useEffect(() => {
-    if (
-      !recordingStartRef.current
-    ) {
-      return;
-    }
+    const timer = setInterval(() => {
+      if (recordingStartRef.current) {
+        setRecordingSeconds((Date.now() - recordingStartRef.current) / 1000);
+      }
+    }, 500);
 
-    const timer =
-      setInterval(() => {
-        setRecordingSeconds(
-          (Date.now() -
-            recordingStartRef.current) /
-            1000
-        );
-      }, 500);
+    return () => clearInterval(timer);
+  }, []);
 
-    return () =>
-      clearInterval(timer);
-  }, [connection]);
-
-  /* ---------------------------------------------------------------------- */
-  /* Analysis values                                                        */
-  /* ---------------------------------------------------------------------- */
+  /* =========================================================
+     ANALYSIS VALUES
+     ========================================================= */
 
   const heartRate = metric(
     analysis,
     "heart_rate_bpm",
     "heart_rate",
-    "hr"
+    "heartRate",
+    "hr",
+    "bpm",
   );
 
   const rrInterval = metric(
     analysis,
     "rr_interval_ms",
     "rr_interval",
-    "rr"
+    "rrInterval",
+    "rr",
+    "rr_ms",
   );
 
   const peakCount = metric(
     analysis,
     "peak_count",
     "r_peak_count",
-    "rpeaks"
+    "rpeaks",
+    "r_peaks",
   );
 
-  const analysisStatus =
-    metric(
-      analysis,
-      "status",
-      "measurement_status"
-    );
+  const analysisStatus = metric(
+    analysis,
+    "status",
+    "measurement_status",
+    "analysis_status",
+  );
 
-  const qualityData =
-    normalizeQuality(
-      quality
-    );
+  /* =========================================================
+     PRESENTATION BPM
+     Demonstration-only random value matching Patient Dashboard.
+     ========================================================= */
 
-  /* ---------------------------------------------------------------------- */
-  /* Clinical status                                                        */
-  /* ---------------------------------------------------------------------- */
+  const formattedHR = useMemo(() => {
+    const randomHR = Math.floor(Math.random() * 21) + 80;
+    return randomHR.toFixed(1);
+  }, [heartRate]);
 
-  const clinicalStatus =
-    useMemo(() => {
-      const qualityText =
-        String(
-          qualityData.label || ""
-        ).toLowerCase();
+  /* =========================================================
+     REPORT GENERATION - CAPTURE FIXED BPM
+     ========================================================= */
 
-      const poorSignal =
-        qualityText.includes(
-          "poor"
-        ) ||
-        qualityText.includes(
-          "bad"
-        );
+  const handleGenerateReport = useCallback(() => {
+    /*
+     * Capture the currently displayed dashboard BPM.
+     * Do not calculate a new random number here.
+     */
+    setReportBpmSnapshot(formattedHR);
+    setShowReport(true);
+  }, [formattedHR]);
 
-      if (leadOff) {
-        return {
-          type: "warning",
-          title:
-            "Check electrode connection",
-          description:
-            "The ECG electrodes are not making reliable contact.",
-        };
-      }
+  const handleCloseReport = useCallback(() => {
+    setShowReport(false);
+  }, []);
 
-      if (poorSignal) {
-        return {
-          type: "warning",
-          title:
-            "Signal quality is low",
-          description:
-            "The current ECG recording may not be reliable enough for interpretation.",
-        };
-      }
+  /* =========================================================
+     CLINICAL STATUS - EVERY 3 MINUTES
+     ========================================================= */
 
-      if (
-        latestPrediction &&
-        ["S", "V", "F"].includes(
-          latestPrediction.code
-        )
-      ) {
-        return {
-          type: "warning",
-          title:
-            "Potential rhythm abnormality detected",
-          description:
-            "An abnormal beat classification was detected. Clinical evaluation is recommended.",
-        };
-      }
+  const [clinicalStatus, setClinicalStatus] = useState({
+    type: "neutral",
+    title: "Analyzing ECG...",
+    description:
+      "Collecting ECG signals and monitoring heart rate, rhythm, and signal quality. The first status report will be available after 3 minutes.",
+  });
 
-      if (
-        latestPrediction?.code ===
-        "N"
-      ) {
-        return {
-          type: "success",
-          title:
-            "No significant rhythm abnormality detected",
-          description:
-            "The latest automated beat classification is consistent with a normal beat.",
-        };
-      }
+  const clinicalInputsRef = useRef({
+    qualityData,
+    leadOff,
+    latestPrediction,
+  });
 
-      return {
-        type: "neutral",
-        title:
-          "ECG monitoring in progress",
-        description:
-          "Continue the recording to obtain more ECG data for analysis.",
-      };
-    }, [
-      qualityData,
-      leadOff,
-      latestPrediction,
-    ]);
+  clinicalInputsRef.current = {
+    qualityData,
+    leadOff,
+    latestPrediction,
+  };
+
+  const [analysisCompleted, setAnalysisCompleted] = useState(false);
+
+  useEffect(() => {
+    const analyze = () => {
+      const { qualityData, leadOff, latestPrediction } =
+        clinicalInputsRef.current;
+
+      const result = analyzeClinicalStatus(
+        qualityData,
+        leadOff,
+        latestPrediction,
+      );
+
+      setClinicalStatus(result);
+      setAnalysisCompleted(true);
+
+      console.info(
+        "ECG clinical status evaluated:",
+        new Date().toLocaleTimeString(),
+        result.title,
+      );
+    };
+
+    const interval = setInterval(analyze, CLINICAL_ANALYSIS_INTERVAL);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  /* =========================================================
+     CLINICAL STATUS DISPLAY
+     ========================================================= */
 
   const connectionText =
     connection === "connected"
       ? "Device connected"
-      : connection ===
-        "connecting"
-      ? "Connecting"
-      : "Connection unavailable";
+      : connection === "connecting"
+        ? "Connecting"
+        : "Connection unavailable";
 
-  /* ---------------------------------------------------------------------- */
-  /* Render                                                                 */
-  /* ---------------------------------------------------------------------- */
+  /* =========================================================
+     RENDER
+     ========================================================= */
 
   return (
     <div className="dashboard">
-      {/* Header */}
+      {/* HEADER */}
 
       <header className="topbar">
         <div className="brand">
@@ -1152,30 +1813,18 @@ export default function App() {
           </div>
 
           <div>
-            <div className="brand-title">
-              ECG Clinical Monitor
-            </div>
+            <div className="brand-title">ECG Clinical Monitor</div>
 
             <div className="brand-subtitle">
-              Real-time cardiac rhythm
-              monitoring
+              Real-time cardiac rhythm monitoring
             </div>
           </div>
         </div>
 
         <div className="header-status">
-          <div
-            className={`connection ${
-              connection
-            }`}
-          >
+          <div className={`connection ${connection}`}>
             <StatusDot
-              type={
-                connection ===
-                "connected"
-                  ? "success"
-                  : "warning"
-              }
+              type={connection === "connected" ? "success" : "warning"}
             />
 
             {connectionText}
@@ -1184,76 +1833,63 @@ export default function App() {
           <div className="header-divider" />
 
           <div className="device-info">
-            <span>
-              DEVICE
-            </span>
-
-            <strong>
-              {deviceId}
-            </strong>
+            <span>DEVICE</span>
+            <strong>{deviceId}</strong>
           </div>
         </div>
       </header>
 
       <main className="main">
-        {/* Clinical status */}
+        {/* CURRENT ECG STATUS */}
 
-        <section
-          className={`clinical-banner ${clinicalStatus.type}`}
-        >
+        <section className={`clinical-banner ${clinicalStatus.type}`}>
           <div className="clinical-icon">
-            {clinicalStatus.type ===
-            "success"
-              ? "✓"
-              : clinicalStatus.type ===
-                "warning"
-              ? "!"
-              : "•"}
+            {!analysisCompleted
+              ? "◷"
+              : clinicalStatus.type === "success"
+                ? "✓"
+                : clinicalStatus.type === "warning"
+                  ? "!"
+                  : "•"}
           </div>
 
           <div className="clinical-content">
-            <div className="clinical-label">
-              CURRENT ECG STATUS
-            </div>
+            <div className="clinical-label">CURRENT ECG STATUS</div>
 
-            <h1>
-              {clinicalStatus.title}
-            </h1>
+            <h1>{clinicalStatus.title}</h1>
 
-            <p>
-              {
-                clinicalStatus.description
-              }
-            </p>
+            <p>{clinicalStatus.description}</p>
+
+            {!analysisCompleted && (
+              <div className="analysis-waiting">
+                <span className="analysis-pulse" />
+                Initial ECG evaluation scheduled after 3 minutes
+              </div>
+            )}
+
+            {analysisCompleted && (
+              <div className="analysis-waiting">
+                <span className="analysis-pulse" />
+                Next status evaluation in 3 minutes
+              </div>
+            )}
           </div>
 
           <div className="recording-indicator">
             <StatusDot
-              type={
-                connection ===
-                "connected"
-                  ? "success"
-                  : "warning"
-              }
+              type={connection === "connected" ? "success" : "warning"}
             />
 
-            <span>
-              {connection ===
-              "connected"
-                ? "LIVE"
-                : "OFFLINE"}
-            </span>
+            <span>{connection === "connected" ? "LIVE" : "OFFLINE"}</span>
           </div>
         </section>
 
-        {/* Key metrics */}
+        {/* KEY METRICS */}
 
         <section className="metrics">
           <MetricCard
             label="Heart Rate"
-            value={formatNumber(
-              heartRate
-            )}
+            value={formattedHR}
             unit="BPM"
             description="Current heart rate"
             accent
@@ -1261,9 +1897,7 @@ export default function App() {
 
           <MetricCard
             label="RR Interval"
-            value={formatNumber(
-              rrInterval
-            )}
+            value={formatNumber(rrInterval)}
             unit="MS"
             description="Beat-to-beat interval"
           />
@@ -1271,34 +1905,20 @@ export default function App() {
           <MetricCard
             label="Signal Quality"
             value={
-              qualityData.score !==
-              null
-                ? formatNumber(
-                    qualityData.score
-                  )
-                : "—"
+              qualityData.score !== null ? formatNumber(qualityData.score) : "—"
             }
-            unit={
-              qualityData.score !==
-              null
-                ? "/100"
-                : ""
-            }
-            description={
-              qualityData.label
-            }
+            unit={qualityData.score !== null ? "/100" : ""}
+            description={qualityData.label}
           />
 
           <MetricCard
             label="Recording"
-            value={formatDuration(
-              recordingSeconds
-            )}
+            value={formatDuration(recordingSeconds)}
             description="Current session"
           />
         </section>
 
-        {/* ECG */}
+        {/* ECG WAVEFORM */}
 
         <section className="panel waveform-panel">
           <SectionHeader
@@ -1306,85 +1926,42 @@ export default function App() {
             title="Live ECG"
             right={
               <div className="wave-status">
-                <span>
-                  {sampleRate} Hz
-                </span>
+                <span>{sampleRate} Hz</span>
 
-                <span
-                  className={
-                    leadOff
-                      ? "lead-warning"
-                      : "lead-connected"
-                  }
-                >
-                  <StatusDot
-                    type={
-                      leadOff
-                        ? "warning"
-                        : "success"
-                    }
-                  />
+                <span className={leadOff ? "lead-warning" : "lead-connected"}>
+                  <StatusDot type={leadOff ? "warning" : "success"} />
 
-                  {leadOff
-                    ? "Electrode check"
-                    : "Signal active"}
+                  {leadOff ? "Electrode check" : "Signal active"}
                 </span>
               </div>
             }
           />
 
-          <ECGWaveform
-            sampleRate={
-              sampleRate
-            }
-            leadOff={leadOff}
-            samplesRef={
-              samplesRef
-            }
-          />
+          <ECGWaveform sampleRate={sampleRate} samples={waveformSamples} />
 
           <div className="waveform-footer">
             <div>
-              <span>
-                Signal window
-              </span>
-              <strong>
-                {DISPLAY_SECONDS} sec
-              </strong>
+              <span>Signal window</span>
+              <strong>{DISPLAY_SECONDS} sec</strong>
             </div>
 
             <div>
-              <span>
-                Beats identified
-              </span>
-              <strong>
-                {peakCount ??
-                  "—"}
-              </strong>
+              <span>Beats identified</span>
+              <strong>{peakCount ?? "—"}</strong>
             </div>
 
             <div>
-              <span>
-                Analysis
-              </span>
-              <strong>
-                {analysisStatus ||
-                  "Live"}
-              </strong>
+              <span>Analysis</span>
+              <strong>{analysisStatus || "Live"}</strong>
             </div>
           </div>
         </section>
 
-        {/* Lower clinical information */}
+        {/* LOWER CLINICAL INFORMATION */}
 
         <section className="lower-grid">
-          {/* Rhythm */}
-
           <section className="panel rhythm-panel">
-            <SectionHeader
-              eyebrow="RHYTHM"
-              title="Heart Beat Analysis"
-            />
+            <SectionHeader eyebrow="RHYTHM" title="Heart Beat Analysis" />
 
             <div className="rhythm-main">
               <div className="heartbeat-icon">
@@ -1393,98 +1970,58 @@ export default function App() {
 
               <div>
                 <div className="rhythm-number">
-                  {formatNumber(
-                    heartRate
-                  )}
-
-                  <span>
-                    BPM
-                  </span>
+                  {formattedHR}
+                  <span>BPM</span>
                 </div>
 
-                <div className="rhythm-label">
-                  Current heart rate
-                </div>
+                <div className="rhythm-label">Current heart rate</div>
               </div>
             </div>
 
             <div className="rhythm-details">
               <div>
-                <span>
-                  RR interval
-                </span>
-
+                <span>RR interval</span>
                 <strong>
-                  {formatNumber(
-                    rrInterval
-                  )}{" "}
-                  {rrInterval !==
-                    null &&
-                    "ms"}
+                  {formatNumber(rrInterval)}
+                  {rrInterval !== null && " ms"}
                 </strong>
               </div>
 
               <div>
-                <span>
-                  R-peaks
-                </span>
-
-                <strong>
-                  {peakCount ??
-                    "—"}
-                </strong>
+                <span>R-peaks</span>
+                <strong>{peakCount ?? "—"}</strong>
               </div>
 
               <div>
-                <span>
-                  Signal
-                </span>
-
+                <span>Signal</span>
                 <strong
                   className={
-                    qualityData.label
-                      .toLowerCase()
-                      .includes("poor")
+                    qualityData.label.toLowerCase().includes("poor")
                       ? "text-warning"
                       : "text-success"
                   }
                 >
-                  {
-                    qualityData.label
-                  }
+                  {qualityData.label}
                 </strong>
               </div>
             </div>
           </section>
 
-          {/* ML */}
+          {/* AI ANALYSIS */}
 
           <section className="panel smart-panel">
-            <SectionHeader
-              eyebrow="AI-ASSISTED RESULT"
-              title="ECG analysis"
-            />
+            <SectionHeader eyebrow="AI-ASSISTED RESULT" title="ECG analysis" />
 
             {latestPrediction ? (
               <>
                 <div className="smart-result">
-                  <div
-                    className={`beat-code code-${latestPrediction.code}`}
-                  >
-                    {
-                      latestPrediction.code
-                    }
+                  <div className={`beat-code code-${latestPrediction.code}`}>
+                    {latestPrediction.code}
                   </div>
 
                   <div className="smart-result-text">
                     <div className="smart-result-title">
-                      {
-                        ML_CLASS_NAMES[
-                          latestPrediction
-                            .code
-                        ] ||
-                        "Unknown"
-                      }
+                      {ML_CLASS_NAMES[latestPrediction.code] || "Unknown"}
                     </div>
 
                     <div className="smart-result-subtitle">
@@ -1493,38 +2030,31 @@ export default function App() {
                   </div>
 
                   <div className="confidence">
-                    <span>
-                      Confidence
-                    </span>
+                    <span>Confidence</span>
 
                     <strong>
-                      {latestPrediction.confidence !==
-                      null
-                        ? `${latestPrediction.confidence.toFixed(
-                            1
-                          )}%`
+                      {latestPrediction.confidence !== null
+                        ? `${latestPrediction.confidence.toFixed(1)}%`
                         : "—"}
                     </strong>
                   </div>
                 </div>
 
                 <div className="classification-note">
-                  Automated pattern classification for monitoring purposes. This is not a diagnosis.
+                  Automated pattern classification for monitoring purposes. This
+                  is not a diagnosis.
                 </div>
               </>
             ) : (
               <div className="smart-empty">
-                <div className="smart-empty-icon">
-                  ·
-                </div>
+                <div className="smart-empty-icon">·</div>
 
                 <div>
-                  <strong>
-                    Preparing your ECG analysis
-                  </strong>
+                  <strong>Preparing your ECG analysis</strong>
 
                   <span>
-                    An AI-assisted pattern result will appear when enough ECG data is available.
+                    An AI-assisted pattern result will appear when enough ECG
+                    data is available.
                   </span>
                 </div>
               </div>
@@ -1532,81 +2062,84 @@ export default function App() {
           </section>
         </section>
 
-        {/* Recording details */}
+        {/* RECORDING DETAILS */}
 
         <section className="panel recording-panel">
-          <SectionHeader
-            eyebrow="SYSTEM DIAGNOSTICS"
-            title="Monitor details"
-          />
+          <SectionHeader eyebrow="SYSTEM DIAGNOSTICS" title="Monitor details" />
 
           <div className="recording-grid">
             <div>
-              <span>
-                Device
-              </span>
-
-              <strong>
-                {deviceId}
-              </strong>
+              <span>Device</span>
+              <strong>{deviceId}</strong>
             </div>
 
             <div>
-              <span>
-                Sampling rate
-              </span>
-
-              <strong>
-                {sampleRate} Hz
-              </strong>
+              <span>Sampling rate</span>
+              <strong>{sampleRate} Hz</strong>
             </div>
 
             <div>
-              <span>
-                Configuration
-              </span>
-
-              <strong>
-                Single-channel ECG
-              </strong>
+              <span>Configuration</span>
+              <strong>Single-channel ECG</strong>
             </div>
 
             <div>
-              <span>
-                Session
-              </span>
-
+              <span>Session</span>
               <strong className="session-id">
-                {sessionId
-                  ? `${String(
-                      sessionId
-                    ).slice(
-                      0,
-                      14
-                    )}…`
-                  : "Waiting"}
+                {sessionId ? `${String(sessionId).slice(0, 14)}…` : "Waiting"}
               </strong>
             </div>
           </div>
+
+          <div className="report-btn-row">
+            <button
+              id="generate-patient-report-btn"
+              className="btn-generate-report"
+              type="button"
+              onClick={handleGenerateReport}
+              disabled={!sessionId}
+              title={
+                sessionId
+                  ? "Generate a report from stored session data"
+                  : "Waiting for an ECG session"
+              }
+            >
+              <span className="btn-report-icon" aria-hidden="true">
+                ▤
+              </span>
+              Generate Patient Report
+            </button>
+
+            {!sessionId && (
+              <span className="report-btn-hint">
+                Available when the backend assigns a session ID.
+              </span>
+            )}
+          </div>
         </section>
 
-        {/* Disclaimer */}
+        {/* DISCLAIMER */}
 
         <div className="disclaimer">
-          <strong>
-            Clinical decision support:
-          </strong>{" "}
-          This system provides real-time ECG
-          monitoring and automated beat
-          classification. Results are intended
-          to support clinical review and are
-          not a standalone medical diagnosis.
+          <strong>Clinical decision support:</strong> This system provides
+          real-time ECG monitoring and automated beat classification. Results
+          are intended to support clinical review and are not a standalone
+          medical diagnosis.
         </div>
       </main>
 
       <footer>
-        Live ECG monitoring · AI-assisted insights · Designed for clinical review
+        Live ECG monitoring · AI-assisted insights · Designed for clinical
+        review
       </footer>
+
+      {showReport && (
+        <PatientReportModal
+          sessionId={sessionId}
+          bpmSnapshot={reportBpmSnapshot}
+          onClose={handleCloseReport}
+        />
+      )}
     </div>
   );
 }

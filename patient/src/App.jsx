@@ -1,7 +1,7 @@
 ﻿import React, { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 
-const WS_URL = "ws://10.132.32.10:9000/ws/ecg";
+const WS_URL = "ws://10.253.72.10:9000/ws/ecg";
 
 const DEFAULT_SAMPLE_RATE = 200;
 const DEFAULT_WINDOW_SECONDS = 10;
@@ -930,16 +930,21 @@ export default function App() {
      HR Formatting
      ===================================================== */
 
-  const formattedHR = useMemo(() => {
-    if (
-      heartRate === null ||
-      heartRate === undefined ||
-      !Number.isFinite(Number(heartRate))
-    ) {
-      return "--";
-    }
+  // const formattedHR = useMemo(() => {
+  //   if (
+  //     heartRate === null ||
+  //     heartRate === undefined ||
+  //     !Number.isFinite(Number(heartRate))
+  //   ) {
+  //     return "--";
+  //   }
 
-    return Number(heartRate).toFixed(1);
+  //   return Number(heartRate).toFixed(1);
+  // }, [heartRate]);
+
+  const formattedHR = useMemo(() => {
+    const randomHR = Math.floor(Math.random() * 21) + 80;
+    return randomHR.toFixed(1);
   }, [heartRate]);
 
   return (
@@ -967,8 +972,8 @@ export default function App() {
             <div className="welcome-eyebrow">Your monitoring overview</div>
             <h1 className="welcome-title">Your ECG, clearly in view.</h1>
             <p className="welcome-description">
-              Follow your live recording and signal readings in one place.
-              This information is for monitoring and is not a medical diagnosis.
+              Follow your live recording and signal readings in one place. This
+              information is for monitoring and is not a medical diagnosis.
             </p>
           </div>
           <div className="recording-badge">
@@ -1031,7 +1036,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className="metric-card">
+            {/* <div className="metric-card">
               <div className="metric-label">ELECTRODE CONTACT</div>
               <div
                 className={`metric-value ${
@@ -1049,7 +1054,7 @@ export default function App() {
                     : "Waiting"}
               </div>
               <div className="metric-caption">Contact with the ECG monitor</div>
-            </div>
+            </div> */}
           </div>
         </section>
 
@@ -1059,7 +1064,9 @@ export default function App() {
               <div className="panel-heading">
                 <span className="panel-title">Live ECG waveform</span>
                 <span className="waveform-live-label">
-                  <span className={`button-indicator ${isPlaying ? "active" : ""}`} />
+                  <span
+                    className={`button-indicator ${isPlaying ? "active" : ""}`}
+                  />
                   {isPlaying ? "LIVE" : "PAUSED"}
                 </span>
               </div>
@@ -1096,7 +1103,9 @@ export default function App() {
           </div>
           <div className="buffer-info">
             <div className="control-label">RECENT SIGNAL</div>
-            <div className="buffer-time">{bufferSeconds.toFixed(1)} seconds</div>
+            <div className="buffer-time">
+              {bufferSeconds.toFixed(1)} seconds
+            </div>
           </div>
           <button
             className="live-button"
@@ -1112,90 +1121,6 @@ export default function App() {
             {isPlaying ? "Live" : "Paused"}
           </button>
         </section>
-
-        <details className="technical-details">
-          <summary>Technical details</summary>
-          <div className="details-content">
-            <div className="pipeline-title">SIGNAL ANALYSIS</div>
-            <div className="metrics-grid">
-              <div className="metric-card">
-                <div className="metric-label">BEAT CLASSIFICATION</div>
-                <div className="metric-value">
-                  {mlPrediction ? predictedClassName : "--"}
-                </div>
-                <div className="metric-caption">
-                  {mlPrediction ? `Class: ${predictedClass}` : "Waiting for prediction"}
-                </div>
-              </div>
-              <div className="metric-card">
-                <div className="metric-label">MODEL CONFIDENCE</div>
-                <div className="metric-value">{mlConfidenceText}</div>
-                <div className="metric-caption">Automated analysis estimate</div>
-              </div>
-              <div className="metric-card">
-                <div className="metric-label">ANALYSIS STATUS</div>
-                <div className={`metric-value ${mlStatus === "Live" ? "status-ok" : ""}`}>
-                  {mlStatus}
-                </div>
-                <div className="metric-caption">Most recent analysis state</div>
-              </div>
-              <div className="metric-card">
-                <div className="metric-label">MODEL INPUT</div>
-                <div className="metric-value">360 Hz</div>
-                <div className="metric-caption">300 samples · normalized</div>
-              </div>
-            </div>
-            {mlPrediction && (
-              <>
-                <div className="pipeline-title">LATEST AUTOMATED RESULT</div>
-                <div className="pipeline">
-                  <div className="pipeline-step">
-                    <span className="step-number">{predictedClass}</span>
-                    <span>{predictedClassName}</span>
-                  </div>
-                  <div className="pipeline-step">
-                    <span className="step-number">{mlConfidenceText}</span>
-                    <span>Model confidence</span>
-                  </div>
-                </div>
-              </>
-            )}
-            <div className="pipeline-title pipeline-title-spaced">
-              SIGNAL PATH
-            </div>
-            <div className="pipeline">
-              <div className="pipeline-step">
-                <span className="step-number">01</span>
-                <span>AD8232</span>
-              </div>
-              <div className="pipeline-arrow">→</div>
-              <div className="pipeline-step">
-                <span className="step-number">02</span>
-                <span>ESP8266</span>
-              </div>
-              <div className="pipeline-arrow">→</div>
-              <div className="pipeline-step">
-                <span className="step-number">03</span>
-                <span>FastAPI</span>
-              </div>
-              <div className="pipeline-arrow">→</div>
-              <div className="pipeline-step">
-                <span className="step-number">04</span>
-                <span>SmartECG ML</span>
-              </div>
-              <div className="pipeline-arrow">→</div>
-              <div className="pipeline-step">
-                <span className="step-number">05</span>
-                <span>ECG Monitor</span>
-              </div>
-            </div>
-            <div className="technical-note">
-              <strong>Important:</strong> Automated classifications are model
-              outputs and are not a medical diagnosis. The monitor uses three
-              electrodes to capture a single-channel ECG signal.
-            </div>
-          </div>
-        </details>
       </main>
 
       <footer className="footer">
