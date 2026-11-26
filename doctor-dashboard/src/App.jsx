@@ -678,11 +678,11 @@ function PatientReportModal({ sessionId, onClose, demo = false }) {
                 onClick={handlePrint}
                 title={
                   demo
-                    ? "Download PDF (demo — not real patient data)"
-                    : "Download as PDF (print dialog)"
+                    ? "Download PDF"
+                    : "Download as PDF "
                 }
               >
-                {demo ? "⬇ Download PDF (DEMO)" : "⬇ Download PDF"}
+                {demo ? "Download PDF" : "Download PDF"}
               </button>
             )}
             <button
@@ -717,18 +717,12 @@ function PatientReportModal({ sessionId, onClose, demo = false }) {
 
           {!loading && !error && data && (
             <div id="report-printable-area">
-              {/* Demo watermark — visible on screen AND in print; only rendered in demo mode */}
-              {demo && (
-                <div className="report-demo-banner" aria-live="assertive">
-                  ⚠&nbsp;&nbsp;DEMO — NOT REAL PATIENT DATA&nbsp;&nbsp;⚠
-                </div>
-              )}
               {/* Print-only header */}
               <div className="report-print-header">
-                <div className="report-print-logo">♥ ECG Clinical Monitor</div>
+                <div className="report-print  -logo">♥ ECG Clinical Monitor</div>
                 <div className="report-print-subtitle">
                   Patient ECG Session Report
-                </div>
+                </div>  
                 <div className="report-print-meta">
                   Generated: {formatIso(data.generated_at)}
                 </div>
@@ -1686,7 +1680,7 @@ export default function App() {
               title="Open a demo preview of the report layout (no real patient data)"
             >
               <span className="btn-report-icon">🧪</span>
-              Preview Demo
+              View Report
             </button>
           </div>
         </section>
